@@ -48,6 +48,7 @@ class FetchWorker(QThread):
     image_loaded = Signal(int, object)
     all_done = Signal(list)
     error = Signal(str)
+    cancelled = Signal(list)
 
     def __init__(self, source, is_url=True, include_script_sources=False, prefer_original=True):
         super().__init__()
@@ -55,6 +56,11 @@ class FetchWorker(QThread):
         self.is_url = is_url
         self.include_script_sources = include_script_sources
         self.prefer_original = prefer_original
+        self._cancelled = False
+
+    def cancel(self):
+        """请求取消。最坏情况要等当前这张图的请求超时（20s）后才会退出循环。"""
+        self._cancelled = True
 
     def _candidate_urls(self, original_url):
         """给出下载候选地址：原图优先 or 压缩版优先"""
@@ -89,8 +95,11 @@ class FetchWorker(QThread):
             else:
                 html = self.source
 
-            urls = extract_image_urls(html, include_scripts=self.include_script_sources)
-            if not urls:
+            urls = []
+            if not self._cancelled:
+                urls = extract_image_urls(html, include_scripts=self.include_script_sources)
+
+            if not urls and not self._cancelled:
                 self.error.emit(
                     "未在内容中找到图片链接。\n\n"
                     "可能原因：\n"
@@ -109,6 +118,8 @@ class FetchWorker(QThread):
             _UI_EXACT, _AVATAR_EXACT, _COVER_EXACT = blocked_config.get_blocked_sets()
 
             for i, url in enumerate(urls):
+                if self._cancelled:
+                    break                                   # 跳出后仍走去重/收尾，保留已下载部分
                 self.progress.emit(i + 1, len(urls))
                 try:
                     candidates = self._candidate_urls(url)
@@ -171,6 +182,12 @@ class FetchWorker(QThread):
                         dup.is_duplicate = True
                         dup.dup_of = group[0].index
             images.sort(key=lambda x: (x.is_duplicate, x.index))
+
+            # 中途取消：去重与排序照常做完，已下载的部分直接交付给界面，只是不发「完成」信号
+            if self._cancelled:
+                self.cancelled.emit(images)
+                return
+
             self.progress.emit(len(urls), len(urls))
             self.all_done.emit(images)
         except requests.RequestException as e:

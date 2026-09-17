@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QFrame, QLayout, QSizePolicy, QPushButton, QScrollArea,
     QMenu,
 )
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage, QFont, QAction
 
 from .worker import ImageInfo
@@ -195,7 +195,12 @@ class ThumbnailItem(QFrame):
 
 
 class ImageViewer(QScrollArea):
-    """大图预览区域"""
+    """大图预览区域
+
+    画质要点：始终保留**原始像素**（self._source），每次缩放都从原图算。
+    旧实现是在 resizeEvent 里对 `preview_label.pixmap()`（已经缩放过的结果）
+    再缩放，拖动窗口几次就逐级糊掉，而且再也回不去。
+    """
     def __init__(self):
         super().__init__()
         self.setWidgetResizable(True)
@@ -210,46 +215,60 @@ class ImageViewer(QScrollArea):
         self.preview_label.setMinimumSize(400, 300)
         self.setWidget(self.preview_label)
 
+        #: 原始像素，只在这里保存一份，缩放不污染它
+        self._source = QPixmap()
+        #: 防抖：拖窗口会连发几十次 resizeEvent，大图逐次重算会卡顿
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(60)
+        self._resize_timer.timeout.connect(self._apply_scale)
+
     def show_image(self, data: bytes):
         if not data:
+            self._source = QPixmap()
+            self.preview_label.clear()
             self.preview_label.setText("无预览")
             self.preview_label.setStyleSheet("color: #999; font-size: 14px;")
             return
         img = QImage()
         img.loadFromData(data)
         if img.isNull():
+            self._source = QPixmap()
+            self.preview_label.clear()
             self.preview_label.setText("无法加载图片")
             return
-        pixmap = QPixmap.fromImage(img)
-        # 缩放到可用宽度
+        self._source = QPixmap.fromImage(img)
+        self.preview_label.setStyleSheet("")
+        self._apply_scale()
+
+    def _apply_scale(self):
+        """按当前可用区域从原图重算一张预览图"""
+        if self._source.isNull():
+            return
         avail_w = self.viewport().width() - 20
         avail_h = self.viewport().height() - 20
-        if avail_w > 0 and avail_h > 0:
-            scaled = pixmap.scaled(
-                avail_w, avail_h,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            )
-        else:
-            scaled = pixmap
+        if avail_w <= 0 or avail_h <= 0:
+            return
+        # 小图不放大：放大只会让原本清晰的图变糊，且没有任何信息增益
+        target_w = min(avail_w, self._source.width())
+        target_h = min(avail_h, self._source.height())
+        if target_w == self._source.width() and target_h == self._source.height():
+            self.preview_label.setPixmap(self._source)   # 原始尺寸直接显示，零重采样
+            return
+        scaled = self._source.scaled(
+            target_w, target_h,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
         self.preview_label.setPixmap(scaled)
-        self.preview_label.setStyleSheet("")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 窗口大小变化时重新缩放预览图
-        if self.preview_label.pixmap() and not self.preview_label.pixmap().isNull():
-            avail_w = self.viewport().width() - 20
-            avail_h = self.viewport().height() - 20
-            if avail_w > 0 and avail_h > 0:
-                scaled = self.preview_label.pixmap().scaled(
-                    avail_w, avail_h,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                self.preview_label.setPixmap(scaled)
+        if not self._source.isNull():
+            self._resize_timer.start()
 
     def clear(self):
+        self._source = QPixmap()
         self.preview_label.clear()
         self.preview_label.setText("加载中...")
 

@@ -3,7 +3,7 @@
 ; 发新版时改 AppVersion（build_release.py 会自动同步，勿手改）
 
 #define MyAppName "ImgSnag 微信公众号版"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.3"
 #define MyAppPublisher "ImgSnag"
 #define MyAppURL "https://github.com/virmuran"
 

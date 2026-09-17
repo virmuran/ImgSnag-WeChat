@@ -3,6 +3,7 @@
 只保留微信策略：mmbiz.qpic.cn 图片识别、CDN 变体合并、水印版剔除、原图画质提升
 """
 import re
+from urllib.parse import urlparse
 
 
 WECHAT_HOST = 'mp.weixin.qq.com'
@@ -14,7 +15,26 @@ _MMBIZ_RE = re.compile(
 
 
 def is_wechat_url(url: str) -> bool:
-    return WECHAT_HOST in (url or '')
+    """判断是否为微信公众号文章链接。
+
+    只认 **主机名正好等于** mp.weixin.qq.com 的地址。
+    早先的实现是 `WECHAT_HOST in url`，属于子串匹配：
+        https://evil.com/mp.weixin.qq.com/x   → 放行（会把请求真的发到 evil.com）
+        https://mp.weixin.qq.com.evil.com/x   → 放行
+        https://notmp.weixin.qq.com.cn/x      → 放行
+    改成解析 URL 后比对 hostname，上述地址一律拒绝；端口、查询串、
+    大小写（MP.WEIXIN.QQ.COM）都不影响判定。
+    """
+    raw = (url or '').strip()
+    if not raw:
+        return False
+    if '://' not in raw:          # 没写协议的裸域名也认，补一个再解析
+        raw = 'https://' + raw
+    try:
+        host = urlparse(raw).hostname or ''
+    except ValueError:            # 畸形 URL（如非法 IPv6 字面量）
+        return False
+    return host.lower() == WECHAT_HOST
 
 
 def resize_mmbiz_url(url: str, size: str) -> str:
@@ -48,8 +68,18 @@ def to_compressed_url(url: str, width: int = 640) -> str:
 
 
 def _normalize_urls(urls):
+    """补全协议前缀，**保持传入顺序**。
+
+    这里绝对不能排序。旧实现用 `sorted(urls)`，而 mmbiz 地址前缀高度雷同
+    （`https://mmbiz.qpic.cn/sz_mmbiz_jpg/<ID>...`），字母序会把正文顺序彻底打乱：
+    实测一篇 8 图文章，正文顺序被排成 8,3,4,5,6,1,7,2。
+
+    后果很实际：导出名是 `img_01.jpg` 起的连号，顺序一乱，
+    `img_01` 就不是正文第一张，下漫画/长图/教程步骤这类图集只能手动重排。
+    顺序由调用方按地址在 HTML 中首次出现的位置给出（见 extract_image_urls）。
+    """
     result = []
-    for u in sorted(urls):
+    for u in urls:
         if u.startswith('//'):
             u = 'https:' + u
         result.append(u)
@@ -88,20 +118,6 @@ def _wechat_image_key(url):
     return url
 
 
-def _wechat_dedup(urls):
-    """合并相同身份图片的多个 CDN URL，优先保留 jpeg 变体（更小）"""
-    seen = {}  # key -> best url
-    for u in urls:
-        key = _wechat_image_key(u)
-        if key not in seen:
-            seen[key] = u
-        else:
-            # 已有则看是否要替换：优先 wx_fmt=jpeg
-            if 'wx_fmt=jpeg' in u.lower() and 'wx_fmt=jpeg' not in seen[key].lower():
-                seen[key] = u
-    return set(seen.values())
-
-
 def _extract_wechat_picture_page_info(html):
     """部分微信文章（尤其"图片消息/贴图"）把正文图放在 JS 变量 picture_page_info_list 中。
 
@@ -118,15 +134,17 @@ def _extract_wechat_picture_page_info(html):
 
     取第一条 cdn_url 即无水印版（本项目的目标）；第二条带水印，且 FILEID 是另一张图，
     不能拿去替换。原实现只认单引号，这里放宽到单/双引号都吃，避免微信改写法后静默失效。
-    若页面无此结构（传统 data-src 文章）返回空集，不影响既有逻辑。
+
+    返回**数组顺序**的地址列表——该顺序即正文顺序（见 _merge_order）。
+    若页面无此结构（传统 data-src 文章）返回空列表，不影响既有逻辑。
     """
     key = 'picture_page_info_list'
     i = html.find(key + ':')
     if i < 0:
-        return set()
+        return []
     j = html.find('[', i)
     if j < 0:
-        return set()
+        return []
     # 括号配对，定位数组结束位置
     depth = 0
     end = -1
@@ -140,7 +158,7 @@ def _extract_wechat_picture_page_info(html):
                 end = k
                 break
     if end < 0:
-        return set()
+        return []
     block = html[j + 1:end]
     # 按顶层对象（大括号深度）切分 item，取每个 item 第一条 cdn_url
     items = []
@@ -156,13 +174,81 @@ def _extract_wechat_picture_page_info(html):
             if depth == 0 and start is not None:
                 items.append(block[start + 1:idx])
                 start = None
-    found = set()
+    found = []
     for ib in items:
         # 只取第一条 cdn_url：item 内嵌套的 watermark_info 里的那条是带水印的另一张图
         m = re.search(r"""cdn_url["']?\s*:\s*["'](https?://mmbiz\.qpic\.cn/[^"']+)["']""", ib)
         if m and len(m.group(1)) > 30:
-            found.add(m.group(1))
+            found.append(m.group(1))
     return found
+
+
+def _merge_order(ppi_urls, body_urls):
+    """把「ppi 数组顺序」与「正文标签顺序」合并为最终输出顺序。
+
+    两个来源都反映正文顺序，但覆盖面不同（2026-09-17 两篇真实文章实测）：
+
+      · 纯 ppi 文章（图片消息/贴图）：正文里几乎没有 data-src，
+        8 张图只有 ppi 数组能完整覆盖 —— 此时必须以 ppi 为主序
+      · 混合文章：正文 data-src/img src 覆盖全部 6 张，而 ppi 只列了 5 张（漏 1 张）——
+        此时正文顺序才对；若按 ppi 偏移排，那张被 ppi 漏掉的图会被挤到最后
+
+    所以这里不能简单按「地址在 HTML 里的偏移」排（ppi 数组所在的 script 可能整体早于正文，
+    实测偏移 486k vs 正文 571k）。规则改为：
+
+      1. 正文已覆盖 ppi 的全部图片 → 直接用正文顺序（DOM 顺序就是阅读顺序，最可靠）
+      2. 否则以 ppi 数组顺序为主序，把「只在正文出现」的图按它在正文中前后的相对位置插回原处
+      3. 任一来源为空 → 用另一来源
+    """
+    if not ppi_urls:
+        return list(body_urls)
+    if not body_urls:
+        return list(ppi_urls)
+
+    body_keys = [_wechat_image_key(u) for u in body_urls]
+    ppi_keys = {_wechat_image_key(u) for u in ppi_urls}
+
+    if ppi_keys <= set(body_keys):
+        # 正文覆盖完整，不必插值
+        return list(body_urls)
+
+    order = list(ppi_urls)
+    idx_of = {_wechat_image_key(u): i for i, u in enumerate(order)}
+    for i, key in enumerate(body_keys):
+        if key in idx_of:
+            continue
+        # 锚点 = 正文中它后面第一张已在序列里的图，插到它前面
+        anchor = None
+        for later in body_keys[i + 1:]:
+            j = idx_of.get(later)
+            if j is not None:
+                anchor = j
+                break
+        if anchor is None:
+            order.append(body_urls[i])
+        else:
+            order.insert(anchor, body_urls[i])
+        # 插入会移动后续下标，重建索引（图片数量级很小，代价可忽略）
+        idx_of = {_wechat_image_key(u): k for k, u in enumerate(order)}
+    return order
+
+
+def _wechat_dedup(urls):
+    """按图片身份合并同一张图的多个 CDN 变体，**保持传入的先后顺序**。
+
+    同一张图微信会从多个 CDN 前缀、多个画质档位发出，必须按 FILEID 合并；
+    合并时若遇到 jpeg 变体而当前保留的是 png，则换成 jpeg（体积更小），
+    但顺序位次仍取最早那次出现——否则一张图的顺序会跟着变体选择一起漂移。
+    """
+    best = {}  # key -> [在输入中的位次, 地址]
+    for i, u in enumerate(urls):
+        key = _wechat_image_key(u)
+        cur = best.get(key)
+        if cur is None:
+            best[key] = [i, u]
+        elif 'wx_fmt=jpeg' in u.lower() and 'wx_fmt=jpeg' not in cur[1].lower():
+            cur[1] = u
+    return [u for _i, u in sorted(best.values(), key=lambda x: x[0])]
 
 
 def extract_image_urls(html, include_scripts=False):
@@ -177,23 +263,30 @@ def extract_image_urls(html, include_scripts=False):
     自动排除作者头像（round_head_img），按图片身份合并 CDN 变体，
     最后统一把尺寸段改写为 /0 —— 文章里的 data-src 给的多是 640px 压缩版，
     直接下载会得到只有几百 KB 的图（见 resize_mmbiz_url 的实测数据）。
+
+    **输出顺序 = 图片在文章正文里的顺序**。这一点很重要——导出名是 `img_01.jpg` 起的连号，
+    顺序错了（下漫画、长图、教程步骤这类图集）就只能手动重排。
+    旧版最后一步是 `sorted(urls)`，而 mmbiz 地址前缀高度雷同，字母序会把正文顺序彻底打乱：
+    实测一篇 8 图文章被排成 8,3,4,5,6,1,7,2，`img_01` 拿到的不是正文第一张。
+    现在由 _merge_order 合并「ppi 数组顺序」与「正文标签顺序」得出（两来源的取舍理由见该函数）。
     """
-    found = set()
+    # ── ppi：数组顺序即正文顺序 ──
+    ppi_urls = [clean_url(u) for u in _extract_wechat_picture_page_info(html)]
 
-    # 微信新结构：正文图嵌在 picture_page_info_list JS 变量里（data-src 为空的文章走这里）
-    found |= _extract_wechat_picture_page_info(html)
+    # ── 正文标签：按在 HTML 中出现的位置排序 ──
+    body = []  # [(偏移, 地址)]
 
-    # 优先从 data-src 提取（微信正文图懒加载源，高分辨率原图）
+    # data-src（微信正文图懒加载源）
     for m in re.finditer(r'data-src=["\'](https?://mmbiz\.qpic\.cn/[^"\']+)["\']', html):
         u = m.group(1)
         if len(u) > 30:
-            found.add(u)
+            body.append((m.start(), u))
 
     # img src（某些旧文章或封面图）
     for m in re.finditer(r'<img[^>]+src=["\'](https?://mmbiz\.qpic\.cn/[^"\']+)["\']', html, re.IGNORECASE):
         u = m.group(1)
         if len(u) > 30:
-            found.add(u)
+            body.append((m.start(), u))
 
     # 全文补充扫描（捕获 script/CSS/json 内的 mmbiz 图片）
     # 某些微信文章不使用 data-src，而是把图片藏在 JS 变量里
@@ -202,21 +295,24 @@ def extract_image_urls(html, include_scripts=False):
         for m in re.finditer(r'https?://mmbiz\.qpic\.cn/[^\"\s<>\(\)\'\\]+', html):
             u = re.sub(r'["\'\);,\\]+$', '', m.group(0))
             if len(u) > 30:
-                found.add(u)
+                body.append((m.start(), u))
+
+    # 按出现位置排序（sort 稳定，同位置的保持来源优先级）
+    body.sort(key=lambda p: p[0])
+
+    # 洗掉 JS/HTML 转义残留与 #imgIndex 锚点（否则 query 会带 \x26amp;amp; 这类垃圾）
+    body_urls = [clean_url(u) for _pos, u in body]
 
     # 排除作者头像（round_head_img 字段，通常为 mmbiz_png）
     avatars = {clean_url(u) for u in re.findall(
         r"round_head_img[\"']?\s*:\s*[\"'](https?://mmbiz\.qpic\.cn/[^\"']+)[\"']", html)}
-
-    # 洗掉 JS/HTML 转义残留与 #imgIndex 锚点（否则 query 会带 \x26amp;amp; 这类垃圾）
-    found = {clean_url(u) for u in found}
     if avatars:
-        found -= avatars
+        ppi_urls = [u for u in ppi_urls if u not in avatars]
+        body_urls = [u for u in body_urls if u not in avatars]
 
-    # 按图片身份去重：合并 mmbiz_jpg/sz_mmbiz_jpg/mmbiz_png 同一张图的多个变体
-    found = _wechat_dedup(found)
+    # 合并出正文顺序 → 按图片身份去重（mmbiz_jpg/sz_mmbiz_jpg 各档位算一张）
+    ordered = _merge_order(ppi_urls, body_urls)
+    ordered = _wechat_dedup(ordered)
 
     # 统一提升为原图地址（改尺寸段为 /0，剥掉 tp=webp 等噪声参数）
-    found = {to_original_url(u) for u in found}
-
-    return _normalize_urls(found)
+    return _normalize_urls([to_original_url(u) for u in ordered])

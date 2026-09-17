@@ -22,6 +22,8 @@ from .widgets import FlowLayout, ThumbnailItem, ImageViewer, SidebarButton, SIDE
 from .history_manager import history_manager, HistoryEntry
 from .blocked_config import blocked_config
 from .extractor import is_wechat_url
+from .file_utils import unique_path
+from .save_worker import SaveWorker
 
 try:
     from version import VERSION
@@ -38,8 +40,10 @@ class ImageDownloaderApp(QMainWindow):
         self.thumb_items: list[ThumbnailItem] = []
         self._preview_index = -1
         self.worker: FetchWorker | None = None
+        self.save_worker: SaveWorker | None = None
         self._last_parsed_url = ""
         self._current_history_id = None
+        self._pending_history_id = None
 
         # 右键屏蔽回调
         ThumbnailItem.on_block_size = self._on_block_size
@@ -170,12 +174,12 @@ class ImageDownloaderApp(QMainWindow):
 
         self.filter_square_cb = QCheckBox("过滤小图与装饰")
         self.filter_square_cb.setToolTip(
-            "精确匹配已知噪音尺寸（正文图几乎不可能碰巧等于这些固定像素）：\n"
-            "  • 微信 UI 装饰：321×192 / 72×170 / 71×170\n"
-            "  • 公众号头像：272×272 / 144×144 / 132×132\n"
-            "  • 封面横幅：1080×460 / 900×383\n"
-            "  • 兜底：最长边 ≤ 200px 或 RGBA PNG < 10KB\n"
-            "取消勾选可重新显示"
+            "自动隐藏「不像正文图」的图片，规则共三条：\n"
+            "  • 最长边 ≤ 200px 的小图（头像、图标、二维码等）\n"
+            "  • 透明的 PNG 且小于 10KB（微信排版用的装饰图）\n"
+            "  • 你右键点过「屏蔽此尺寸」的尺寸 —— 学到的规则会在下次解析自动生效\n"
+            "隐藏只是不显示、不勾选，不会删掉任何文件；\n"
+            "取消勾选就能把这些图重新显示出来再挑。"
         )
         self.filter_square_cb.setChecked(True)
         self.filter_square_cb.toggled.connect(self._on_filter_toggled)
@@ -313,7 +317,9 @@ class ImageDownloaderApp(QMainWindow):
         self.download_btn.setEnabled(False)
         self.select_all_btn.setEnabled(False)
         self.deselect_all_btn.setEnabled(False)
-        self.parse_btn.setEnabled(False)
+        # 解析中按钮转为「取消解析」并保持可点 —— 若禁用就没法中止长文章的解析
+        self.parse_btn.setEnabled(True)
+        self.parse_btn.setText("取消解析")
         self.url_input.setEnabled(False)
         self.paste_btn.setEnabled(False)
         self.sort_cb.setEnabled(False)
@@ -327,6 +333,7 @@ class ImageDownloaderApp(QMainWindow):
 
     def _on_parse_done(self, success):
         self.parse_btn.setEnabled(True)
+        self.parse_btn.setText("解析图片")
         self.url_input.setEnabled(True)
         self.paste_btn.setEnabled(True)
         self.script_cb.setChecked(False)  # 单次生效，解析后自动取消
@@ -361,27 +368,22 @@ class ImageDownloaderApp(QMainWindow):
 
     def _on_block_size(self, info, category, size):
         """右键菜单屏蔽此尺寸：写入 JSON + 立即重新过滤当前结果"""
-        ok = blocked_config.add_blocked(category, size)
-        if not ok:
-            return  # 已存在
+        if not blocked_config.add_blocked(category, size):
+            self.status.showMessage(f"尺寸 {size[0]}×{size[1]} 已在屏蔽列表中")
+            return
 
         w, h = size
-        self.status.showMessage(f"已添加屏蔽 {category}: {w}×{h}，刷新中...")
-        # 重新过滤当前所有缩略图
+        hit = 0
         for item in self.thumb_items:
             if (item.info.width, item.info.height) == size:
                 item.info.is_mini_square = True
+                hit += 1
                 if self.filter_square_cb.isChecked():
                     item.set_visible_state(False)
-            elif item.info.is_mini_square:
-                # 重新检查（以防之前被过滤的）
-                w2, h2 = item.info.width, item.info.height
-                _ui, _av, _cv = blocked_config.get_blocked_sets()
-                if (w2, h2) in _ui or (w2, h2) in _av or (w2, h2) in _cv:
-                    item.info.is_mini_square = True
-                    if self.filter_square_cb.isChecked():
-                        item.set_visible_state(False)
         self._update_download_btn()
+        self.status.showMessage(
+            f"已屏蔽 {w}×{h}（本页命中 {hit} 张）—— 下次解析遇到该尺寸会自动过滤"
+        )
 
     def _on_thumb_clicked(self, info):
         """点击缩略图切换大图预览"""
@@ -396,7 +398,7 @@ class ImageDownloaderApp(QMainWindow):
                 self.preview.show_image(info.data)
                 break
 
-    def _on_all_done(self, images):
+    def _on_all_done(self, images, was_cancelled=False):
         self.images = images
         self._on_parse_done(True)
         self.progress.setVisible(False)
@@ -415,8 +417,13 @@ class ImageDownloaderApp(QMainWindow):
         fallback = sum(1 for i in images if not i.used_original)
         if fallback:
             text += f"（{fallback} 张回退压缩版）"
+        if was_cancelled:
+            text = "已取消 — " + text
         self.info_label.setText(text)
-        self.status.showMessage(text + " — 勾选后点击「下载选中图片」")
+        self.status.showMessage(
+            text + ("；已下载的照样可以勾选保存"
+                   if was_cancelled else " — 勾选后点击「下载选中图片」")
+        )
         self.select_all_btn.setEnabled(True)
         self.deselect_all_btn.setEnabled(True)
         self.sort_cb.setEnabled(True)
@@ -501,47 +508,86 @@ class ImageDownloaderApp(QMainWindow):
             return
         fmt_map = {"原格式": "", "JPG": ".jpg", "PNG": ".png", "WebP": ".webp"}
         fmt = fmt_map.get(self.fmt_cb.currentText(), "")
-        count = 0
+
+        # 先把要写的图快照成纯数据交给后台线程，避免线程回头去读界面控件
+        targets = []
         for item in self.thumb_items:
             if not item.checkbox.isChecked() or item.filtered_out:
                 continue
-            ext = fmt if fmt else item.info.ext
-            filename = f"img_{item.info.index + 1:02d}{ext}"
-            filepath = os.path.join(folder, filename)
-            if os.path.exists(filepath):
-                base, _ = os.path.splitext(filename)
-                filepath = os.path.join(folder, f"{base}_{count}{ext}")
-            if fmt and fmt != item.info.ext:
-                from PySide6.QtGui import QImage
-                img = QImage()
-                img.loadFromData(item.info.data)
-                if not img.save(filepath, fmt.lstrip('.').upper()):
-                    filepath = filepath.replace(fmt, item.info.ext)
-                    with open(filepath, 'wb') as f:
-                        f.write(item.info.data)
-            else:
-                with open(filepath, 'wb') as f:
-                    f.write(item.info.data)
-            count += 1
+            # 编号取自解析顺序（= 正文顺序），所以按尺寸/分辨率排序只影响显示，不会改掉文件名
+            targets.append((item.info.data, f"img_{item.info.index + 1:02d}", item.info.ext))
+        if not targets:
+            return
 
-        if self._current_history_id:
-            history_manager.update(
-                self._current_history_id,
-                success_images=count,
-                save_path=folder,
-                status="done" if count > 0 else "failed"
-            )
+        # 历史记录的 id 先摘下来，免得保存期间用户又解析一次把它覆盖掉
+        self._pending_history_id = self._current_history_id
         self._current_history_id = None
         self._last_parsed_url = ""
 
-        QMessageBox.information(self, "下载完成", f"已保存 {count} 张图片到:\n{folder}")
-        self.status.showMessage(f"已保存 {count} 张图片到 {folder}")
+        self.download_btn.setEnabled(False)
+        self.download_btn.setText(f"保存中 0/{len(targets)}")
+        self.info_label.setText(f"正在保存 {len(targets)} 张...")
+        self.status.showMessage(f"正在保存到 {folder} ...")
+
+        self.save_worker = SaveWorker(targets, folder, fmt)
+        self.save_worker.progress.connect(self._on_save_progress)
+        self.save_worker.done.connect(lambda s, f, e: self._on_save_done(s, f, e, folder))
+        self.save_worker.failed.connect(self._on_save_failed)
+        self.save_worker.start()
+
+    def _on_save_progress(self, current, total):
+        self.download_btn.setText(f"保存中 {current}/{total}")
+
+    def _on_save_done(self, saved, fallback, errors, folder):
+        if self._pending_history_id:
+            history_manager.update(
+                self._pending_history_id,
+                success_images=saved,
+                save_path=folder,
+                status="done" if saved > 0 else "failed"
+            )
+            self._pending_history_id = None
+
+        self._update_download_btn()   # 恢复按钮文案与可用状态
+
+        msg = f"已保存 {saved} 张图片到:\n{folder}"
+        if fallback:
+            msg += f"\n\n其中 {fallback} 张格式转换失败，已按原格式保存。"
+        if errors:
+            shown = "\n".join(errors[:5])
+            msg += f"\n\n以下 {len(errors)} 张未能写出：\n{shown}"
+            if len(errors) > 5:
+                msg += "\n…"
+        if errors:
+            QMessageBox.warning(self, "下载完成（有失败）", msg)
+        else:
+            QMessageBox.information(self, "下载完成", msg)
+        self.status.showMessage(f"已保存 {saved} 张图片到 {folder}")
+
+    def _on_save_failed(self, msg):
+        self._pending_history_id = None
+        self._update_download_btn()
+        self.status.showMessage(msg)
+        QMessageBox.warning(self, "保存失败", msg)
 
     def _clear_thumbnails(self):
         while self.thumb_strip.count() > 1:  # 保留最后的 stretch
             item = self.thumb_strip.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def closeEvent(self, event):
+        """关窗前等后台线程收尾。
+
+        QThread 在线程仍在运行时被销毁，Qt 会直接报
+        `QThread: Destroyed while thread is still running` 并可能崩溃退不出。
+        """
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(3000)
+        if self.save_worker is not None and self.save_worker.isRunning():
+            self.save_worker.wait(5000)   # 落盘不做半途中断，等它写完
+        super().closeEvent(event)
 
     def _start_worker(self, source, is_url):
         self._reset_before_parse()
@@ -553,8 +599,13 @@ class ImageDownloaderApp(QMainWindow):
         self.worker.progress.connect(self._on_progress)
         self.worker.image_loaded.connect(self._on_image_loaded)
         self.worker.all_done.connect(self._on_all_done)
+        self.worker.cancelled.connect(self._on_parse_cancelled)
         self.worker.error.connect(self._on_error)
         self.worker.start()
+
+    def _on_parse_cancelled(self, images):
+        """用户中止解析：已经下载下来的部分照常交付，不丢弃"""
+        self._on_all_done(images, was_cancelled=True)
 
     def _on_paste_html(self):
         clipboard = QApplication.clipboard()
@@ -566,6 +617,15 @@ class ImageDownloaderApp(QMainWindow):
             self.status.showMessage("剪贴板为空")
 
     def _on_parse(self):
+        # 解析进行中：同一个按钮转为「取消解析」
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.parse_btn.setEnabled(False)
+            self.parse_btn.setText("正在取消...")
+            self.info_label.setText("正在取消...")
+            self.status.showMessage("正在取消解析（等当前这张图收尾，最多 20 秒）...")
+            return
+
         text = self.url_input.toPlainText().strip()
         if not text:
             return
