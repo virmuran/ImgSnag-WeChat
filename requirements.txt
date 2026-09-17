@@ -1,0 +1,8 @@
+# 运行依赖（只要 Qt Essentials：QtCore / QtGui / QtWidgets）
+# 不装完整 PySide6 元包 —— 它会连 PySide6-Addons（Qt3D/QtMultimedia/QtWebEngine 等）
+# 一起拉下来，本项目用不到，白白多出几百 MB 下载量和一堆 Qt DLL
+PySide6-Essentials>=6.5.0
+requests>=2.28.0
+
+# 打包依赖（仅发版时需要，正常运行不用装）：
+#   pyinstaller>=6.0

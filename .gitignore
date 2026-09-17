@@ -1,0 +1,60 @@
+# ── Python 运行产物 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyz
+
+# ── 虚拟环境 ──
+# （venv 自己会在目录内生成 .gitignore，这里再写一遍是防止误删那层保护）
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# ── PyInstaller 构建输出 ──
+# spec 文件是源码，要提交；这些是构建产物，不提交
+build/
+dist/
+installer/
+
+# ── 可执行文件与安装包 ──
+*.exe
+*.msi
+*.dll
+*.pyd
+ImgSnagWeChat_*_portable.zip
+
+# ── 用户运行时数据（正常在用户目录：~/.imgsnag_wechat、%APPDATA%/ImgSnagWeChat）──
+# 兜底：调试时若被改到项目内，不应提交
+history.db
+blocked_sizes.json
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 日志与临时文件 ──
+*.log
+*.tmp
+*.bak
+*.orig
+
+# ── 发版说明草稿（一次性产物，只用来粘进 GitHub Releases 正文；
+#    版本记录的唯一来源是 version.py 与 Releases 页）──
+RELEASE_NOTES_v*.md
+
+# ── WorkBuddy 工作目录（调试脚本/截图/测试报告，非源码）──
+.workbuddy/
