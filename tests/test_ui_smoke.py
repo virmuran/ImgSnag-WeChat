@@ -27,6 +27,14 @@
    预览缩放（能看 100% 像素）、缩略图卡片信息行与「重复/小图」角标、
    被过滤图片的可点开入口、全选按钮文案切换、历史页搜索、空状态引导、
    输入框回车解析（eventFilter 若没有实现就是死代码，专门钉一条）。
+
+六、v1.3.0 的缩放锚点与拖动
+   Ctrl+滚轮要以鼠标位置为锚点（旧实现永远从左上角放大，"想看某个细节"就得滚半天），
+   放大到超出视口后按空格可以拖动。
+   空间关系类的修复只能靠几何断言钉住：断言鼠标下的那个原图像素缩放前后仍停在原地，
+   以及拖动 N 像素后滚动条恰好走了 N 像素。
+   空格是**应用级**过滤器拦的（焦点在别的控件上），所以必须同时钉住"不该拦的时候别拦"：
+   图没超出视口、焦点在文本框里这两种情况都要放行，否则会把用户正在输入的空格吃掉。
 """
 import os
 import sys
@@ -460,6 +468,208 @@ def test_empty_guide_and_enter(app):
         QMessageBox.warning = orig_warn
 
 
+def wheel_at(viewer, vp_point, delta):
+    """造一个真实滚轮事件。
+
+    全局坐标由视口坐标反算 —— 和事件处理器里 `viewport().mapFromGlobal()` 的还原方式
+    一致，这样测的才是真实那条路径（而不是直接调内部方法绕过坐标换算）。
+    """
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+    g = viewer.viewport().mapToGlobal(vp_point)
+    return QWheelEvent(QPointF(vp_point), QPointF(g), QPoint(), QPoint(0, delta),
+                       Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False)
+
+
+def test_zoom_anchor(app):
+    """Ctrl+滚轮必须放大「鼠标指着的地方」，而不是永远从左上角长出来"""
+    from PySide6.QtCore import QPoint
+
+    from web_image_dl.widgets import ImageViewer
+
+    print('\n[UI-15] Ctrl+滚轮以鼠标位置为锚点')
+    viewer = ImageViewer()
+    viewer.resize(900, 700)
+    viewer.show()
+    QApplication.processEvents()
+    viewer.show_image(png_bytes(2000, 1500))
+    QApplication.processEvents()
+
+    check(viewer._fit is True, '默认适应窗口')
+    eq(viewer.horizontalScrollBar().value(), 0, '适应窗口时横向没有滚动余量（此时必然贴左上角）')
+
+    # 锚点取显示图的中间偏右偏下：这里离开左上角足够远，"左上角锚定"和"鼠标锚定"的差别很明显
+    disp = viewer.preview_label.size()
+    origin = viewer.preview_label.mapTo(viewer.viewport(), QPoint(0, 0))
+    anchor = QPoint(origin.x() + int(disp.width() * 0.75),
+                    origin.y() + int(disp.height() * 0.55))
+    before = viewer._source_point_at(anchor)
+    check(before is not None, '能反算出鼠标指着的原图像素')
+    if before is None:
+        return
+
+    app.sendEvent(viewer.preview_label, wheel_at(viewer, anchor, 120))
+    QApplication.processEvents()
+    check(viewer._fit is False and viewer.preview_label.width() > disp.width(),
+          f'滚轮确实放大了（{disp.width()} → {viewer.preview_label.width()}）')
+
+    after = viewer._source_point_at(anchor)
+    check(after is not None, '放大后仍能反算锚点处的原图像素')
+    if after is not None:
+        dx, dy = abs(after[0] - before[0]), abs(after[1] - before[1])
+        check(dx <= 4 and dy <= 4,
+              f'鼠标下的像素缩放前后停在原地（偏移 {dx:.1f}, {dy:.1f} 原图像素）'
+              f' 前 {before[0]:.0f},{before[1]:.0f} 后 {after[0]:.0f},{after[1]:.0f}')
+    check(viewer.horizontalScrollBar().value() > 0,
+          '横向滚动条被推开了 —— 旧实现（左上角锚定）这里永远是 0')
+
+    # 再滚一次，锚点要持续成立（不是只对第一下有效）
+    before2 = viewer._source_point_at(anchor)
+    app.sendEvent(viewer.preview_label, wheel_at(viewer, anchor, 120))
+    QApplication.processEvents()
+    after2 = viewer._source_point_at(anchor)
+    if before2 and after2:
+        dx, dy = abs(after2[0] - before2[0]), abs(after2[1] - before2[1])
+        check(dx <= 4 and dy <= 4, f'连续缩放锚点依旧稳定（偏移 {dx:.1f}, {dy:.1f}）')
+
+    # 缩回比视口还小的时候，图会被居中，锚点自然失效——不该崩、也不该留下怪状态
+    for _ in range(12):
+        app.sendEvent(viewer.preview_label, wheel_at(viewer, anchor, -120))
+        QApplication.processEvents()
+    check(viewer.preview_label.width() < viewer.viewport().width(),
+          '能一路缩到比视口还小')
+    eq(viewer._source.size(), QSize(2000, 1500), '反复缩放不污染原始像素')
+
+
+def test_space_pan(app):
+    """放大超出视口后，按住空格 + 拖动 = 平移"""
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QKeyEvent, QMouseEvent
+
+    from web_image_dl.widgets import ImageViewer
+
+    print('\n[UI-16] 按住空格拖动平移')
+    viewer = ImageViewer()
+    viewer.resize(900, 700)
+    viewer.show()
+    QApplication.processEvents()
+    viewer.show_image(png_bytes(2000, 1500))
+    QApplication.processEvents()
+
+    # 空格能不能拦，取决于鼠标是否悬在预览区上；离屏环境光标位置不可控，直接钉住这一条
+    viewer.under_mouse = lambda: True
+
+    space_press = QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier)
+    space_release = QKeyEvent(QEvent.KeyRelease, Qt.Key_Space, Qt.NoModifier)
+
+    eq(viewer._pan_available(), False, '图还在窗口里装得下 → 没什么可拖')
+    check(viewer._handle_space_key(space_press) is False, '此时空格照常放行（没抢用户的空格）')
+    check(viewer._space_held is False, '没进入拖动待命状态')
+
+    viewer.set_zoom(2.0)
+    QApplication.processEvents()
+    eq(viewer._pan_available(), True, '放大到超出视口后可以拖')
+    check(viewer._handle_space_key(space_press) is True, '空格被拦截（进入拖动待命）')
+    check(viewer._space_held is True, '已进入拖动待命状态')
+    eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor, '光标变成张开的手，提示可以拖')
+
+    viewer._set_scroll(300, 200)        # 先挪到中间，双向都留出余量
+    QApplication.processEvents()
+    h0 = viewer.horizontalScrollBar().value()
+    v0 = viewer.verticalScrollBar().value()
+    check(h0 > 0 and v0 > 0, f'拖动前滚动条在中间（h={h0} v={v0}）')
+
+    start = QPoint(400, 350)
+    g0 = viewer.viewport().mapToGlobal(start)
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseButtonPress, QPointF(start), QPointF(g0),
+        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.processEvents()
+    check(viewer._panning is True, '按下左键进入拖动中')
+    eq(viewer.viewport().cursor().shape(), Qt.ClosedHandCursor, '拖动中光标变成握拳')
+
+    move = QPoint(start.x() - 120, start.y() - 80)
+    gm = viewer.viewport().mapToGlobal(move)
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseMove, QPointF(move), QPointF(gm),
+        Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.processEvents()
+    eq(viewer.horizontalScrollBar().value(), h0 + 120, '向左拖 → 内容跟手（横向 +120）')
+    eq(viewer.verticalScrollBar().value(), v0 + 80, '向上拖 → 内容跟手（纵向 +80）')
+
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseButtonRelease, QPointF(move), QPointF(gm),
+        Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+    QApplication.processEvents()
+    check(viewer._panning is False, '松开左键结束拖动')
+    check(viewer._handle_space_key(space_release) is True, '松开空格退出待命状态')
+    check(viewer._space_held is False, '空格状态已复位')
+    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '光标恢复成箭头')
+
+    # 没按空格时不能拖 —— 否则就是"点一下就乱滚"
+    h1 = viewer.horizontalScrollBar().value()
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseButtonPress, QPointF(start), QPointF(g0),
+        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseMove, QPointF(move), QPointF(gm),
+        Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.processEvents()
+    eq(viewer.horizontalScrollBar().value(), h1, '没按空格时拖不动（不会误滚）')
+
+
+def test_pan_guards(app):
+    """应用级空格过滤器最容易误伤的地方：把用户正在输入的空格吃掉"""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+
+    from web_image_dl.app import ImageDownloaderApp
+
+    print('\n[UI-17] 不该拦空格的时候要放行')
+    win = ImageDownloaderApp()
+    win.show()
+    QApplication.processEvents()
+
+    viewer = win.preview
+    viewer.under_mouse = lambda: True          # 离屏环境光标不可控
+    viewer.show_image(png_bytes(3000, 2400))
+    QApplication.processEvents()
+    viewer.set_zoom(1.5)
+    QApplication.processEvents()
+
+    eq(viewer._pan_available(), True, '大图 + 鼠标在预览区 → 可以拖')
+
+    # 焦点在文本框里（用户在打字）时必须放行，否则输入的空格会莫名其妙消失。
+    # 这里改的是实例属性：给类赋 staticmethod 在 PySide6 生成的类型上不生效，
+    # 拿回来的还是裸函数，会被当成 self 传进去。
+    viewer._text_input_focused = lambda: True
+    try:
+        eq(viewer._pan_available(), False, '焦点在文本框里 → 不拦截')
+        check(viewer._handle_space_key(
+            QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier)) is False,
+            '空格原样交给输入框')
+    finally:
+        del viewer._text_input_focused
+
+    # 真在输入框里敲空格：字符必须真的进去
+    win.url_input.setPlainText('')
+    win.url_input.setFocus()
+    QApplication.processEvents()
+    if QApplication.focusWidget() is win.url_input:
+        # 注意 text 参数不能省：QTextEdit 插入的是 event.text()，不带上就什么都不会进去
+        app.sendEvent(win.url_input,
+                      QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, ' '))
+        QApplication.processEvents()
+        eq(win.url_input.toPlainText(), ' ',
+           '链接框里的空格真的敲进去了（没被预览区的拖动逻辑吞掉）')
+    else:
+        print('   （离屏环境拿不到输入焦点，这条跳过；上面的守卫断言已覆盖同一逻辑）')
+
+    win.parse_btn.setFocus()        # 焦点挪出文本框（按钮不是文本框）
+    QApplication.processEvents()
+    eq(viewer._pan_available(), True, '焦点离开文本框后又能拖了')
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     test_preview_scale(app)
@@ -473,6 +683,9 @@ def main():
     test_select_all_button(app)
     test_history_search(app)
     test_empty_guide_and_enter(app)
+    test_zoom_anchor(app)
+    test_space_pan(app)
+    test_pan_guards(app)
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:
