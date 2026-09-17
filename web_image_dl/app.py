@@ -136,6 +136,16 @@ class ImageDownloaderApp(QMainWindow):
         )
         self.script_cb.setStyleSheet("font-size: 12px; color: #666; padding: 0 4px;")
         input_row.addWidget(self.script_cb)
+
+        self.original_cb = QCheckBox("原图画质")
+        self.original_cb.setToolTip(
+            "微信正文图地址默认带 /640，直接下载得到的是宽 640 的压缩版（常常只有几百 KB）。\n"
+            "勾选后改为请求 /0 原图，清晰度与体积都会明显提升（实测同一张图最大差 4 倍）。\n"
+            "原图取不到时会自动回退压缩版，不会导致整张失败。"
+        )
+        self.original_cb.setChecked(True)
+        self.original_cb.setStyleSheet("font-size: 12px; color: #666; padding: 0 4px;")
+        input_row.addWidget(self.original_cb)
         root.addLayout(input_row)
 
         # 进度条
@@ -392,6 +402,7 @@ class ImageDownloaderApp(QMainWindow):
         self.progress.setVisible(False)
         unique = sum(1 for i in images if not i.is_duplicate)
         dup = sum(1 for i in images if i.is_duplicate)
+        total_mb = sum(len(i.data) for i in images) / 1048576
         text = f"共 {len(images)} 张"
         if unique:
             text += f"（{unique} 张有效"
@@ -399,6 +410,11 @@ class ImageDownloaderApp(QMainWindow):
             text += f"，{dup} 张重复"
         if unique:
             text += "）"
+        if images:
+            text += f"，合计 {total_mb:.1f} MB"
+        fallback = sum(1 for i in images if not i.used_original)
+        if fallback:
+            text += f"（{fallback} 张回退压缩版）"
         self.info_label.setText(text)
         self.status.showMessage(text + " — 勾选后点击「下载选中图片」")
         self.select_all_btn.setEnabled(True)
@@ -532,7 +548,8 @@ class ImageDownloaderApp(QMainWindow):
         if is_url:
             self._last_parsed_url = source
         include_scripts = is_url and self.script_cb.isChecked()
-        self.worker = FetchWorker(source, is_url, include_scripts)
+        prefer_original = self.original_cb.isChecked()
+        self.worker = FetchWorker(source, is_url, include_scripts, prefer_original)
         self.worker.progress.connect(self._on_progress)
         self.worker.image_loaded.connect(self._on_image_loaded)
         self.worker.all_done.connect(self._on_all_done)

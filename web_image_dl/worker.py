@@ -2,6 +2,9 @@
 网络请求与下载线程
 FetchWorker：后台线程，请求微信文章 → 提取图片URL → 逐个下载 → 发射信号
 纯 requests 实现，无浏览器依赖
+
+画质策略：默认请求 **原图**（尺寸段 /0），失败或返回过小则回退文章里的 640px 压缩版，
+保证「能拿到原图就拿原图，拿不到也不至于整张失败」。
 """
 import hashlib
 from dataclasses import dataclass
@@ -10,7 +13,7 @@ import requests
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-from .extractor import extract_image_urls
+from .extractor import extract_image_urls, to_compressed_url
 from .blocked_config import blocked_config
 
 
@@ -18,6 +21,9 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
 }
+
+#: 小于此字节数的响应视为无效图（微信错误页/占位图都很小）
+MIN_IMAGE_BYTES = 500
 
 
 @dataclass
@@ -32,6 +38,9 @@ class ImageInfo:
     height: int = 0
     ext: str = ".jpg"
     is_mini_square: bool = False
+    original_url: str = ""       # 原图地址（/0）
+    fallback_url: str = ""       # 压缩版地址（/640）
+    used_original: bool = True   # 实际下载的是否为原图
 
 
 class FetchWorker(QThread):
@@ -40,11 +49,35 @@ class FetchWorker(QThread):
     all_done = Signal(list)
     error = Signal(str)
 
-    def __init__(self, source, is_url=True, include_script_sources=False):
+    def __init__(self, source, is_url=True, include_script_sources=False, prefer_original=True):
         super().__init__()
         self.source = source
         self.is_url = is_url
         self.include_script_sources = include_script_sources
+        self.prefer_original = prefer_original
+
+    def _candidate_urls(self, original_url):
+        """给出下载候选地址：原图优先 or 压缩版优先"""
+        compressed = to_compressed_url(original_url)
+        if compressed == original_url:      # 非 mmbiz 地址，没有变体可言
+            return [original_url]
+        if self.prefer_original:
+            return [original_url, compressed]
+        return [compressed, original_url]
+
+    @staticmethod
+    def _download_one(urls, headers):
+        """按候选顺序下载，返回 (实际使用的URL, 数据)；全部失败返回 (None, None)"""
+        for u in urls:
+            try:
+                r = requests.get(u, headers=headers, timeout=20)
+                r.raise_for_status()
+                if len(r.content) < MIN_IMAGE_BYTES:
+                    continue
+                return u, r.content
+            except Exception as e:
+                print(f"  retry next candidate: {u[:70]}... : {e}")
+        return None, None
 
     def run(self):
         try:
@@ -78,13 +111,12 @@ class FetchWorker(QThread):
             for i, url in enumerate(urls):
                 self.progress.emit(i + 1, len(urls))
                 try:
-                    r = requests.get(url, headers=dl_headers, timeout=20)
-                    r.raise_for_status()
-                    data = r.content
-                    if len(data) < 500:
+                    candidates = self._candidate_urls(url)
+                    used_url, data = self._download_one(candidates, dl_headers)
+                    if data is None:
                         continue
                     ext = ".jpg"
-                    ul = url.lower()
+                    ul = used_url.lower()
                     if '.png' in ul or 'wx_fmt=png' in ul:
                         ext = ".png"
                     elif '.webp' in ul:
@@ -96,7 +128,12 @@ class FetchWorker(QThread):
                     w, h = img.width(), img.height()
                     if w == 0 or h == 0:
                         continue
-                    info = ImageInfo(url=url, index=i, data=data, width=w, height=h, ext=ext)
+                    info = ImageInfo(
+                        url=used_url, index=i, data=data, width=w, height=h, ext=ext,
+                        original_url=url,
+                        fallback_url=candidates[-1],
+                        used_original=(used_url == url),
+                    )
                     max_dim, min_dim = max(w, h), min(w, h)
                     size_key = (w, h)
 

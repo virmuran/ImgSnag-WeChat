@@ -52,6 +52,11 @@ desktop.ini
 *.bak
 *.orig
 
+# ── 诊断/构建过程的临时输出（tools 脚本与打包日志）──
+*_out.txt
+*_log.txt
+max_q.txt
+
 # ── 发版说明草稿（一次性产物，只用来粘进 GitHub Releases 正文；
 #    版本记录的唯一来源是 version.py 与 Releases 页）──
 RELEASE_NOTES_v*.md
