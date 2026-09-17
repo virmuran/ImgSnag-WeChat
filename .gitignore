@@ -56,6 +56,7 @@ desktop.ini
 *_out.txt
 *_log.txt
 max_q.txt
+_ui_shots/
 
 # ── 发版说明草稿（一次性产物，只用来粘进 GitHub Releases 正文；
 #    版本记录的唯一来源是 version.py 与 Releases 页）──

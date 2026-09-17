@@ -12,9 +12,9 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QScrollArea, QCheckBox, QLabel,
     QProgressBar, QFileDialog, QMessageBox, QStatusBar, QTextEdit,
     QComboBox, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QSizePolicy,
+    QHeaderView, QAbstractItemView, QSizePolicy, QSpacerItem,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QColor
 
 from .worker import FetchWorker, ImageInfo
@@ -73,6 +73,13 @@ class ImageDownloaderApp(QMainWindow):
         self.stack.addWidget(self.history_page)
         h_root.addWidget(self.stack, 1)
 
+        # 预览缩放快捷键（配合 Ctrl+滚轮 / 双击，用于 100% 查验是不是真原图）
+        for seq, slot in (("Ctrl+0", self.preview.fit_to_window),
+                          ("Ctrl+1", self.preview.zoom_100),
+                          ("Ctrl+=", self.preview.zoom_in),
+                          ("Ctrl+-", self.preview.zoom_out)):
+            QShortcut(QKeySequence(seq), self).activated.connect(slot)
+
         self.status = QStatusBar()
         self.status.showMessage("就绪")
         self.setStatusBar(self.status)
@@ -85,16 +92,25 @@ class ImageDownloaderApp(QMainWindow):
         layout.setContentsMargins(6, 16, 6, 16)
         layout.setSpacing(8)
 
-        self.btn_parse = SidebarButton("解析", "")
+        self.btn_parse = SidebarButton("解析", "▣")
+        self.btn_parse.setToolTip("解析公众号文章，挑图下载")
         self.btn_parse.setChecked(True)
         self.btn_parse.clicked.connect(lambda: self._switch_page(0))
         layout.addWidget(self.btn_parse)
 
-        self.btn_history = SidebarButton("历史", "")
+        self.btn_history = SidebarButton("历史", "≡")
+        self.btn_history.setToolTip("查看解析与下载记录")
         self.btn_history.clicked.connect(lambda: self._switch_page(1))
         layout.addWidget(self.btn_history)
 
         layout.addStretch()
+
+        if VERSION:
+            ver_label = QLabel(f"v{VERSION}")
+            ver_label.setAlignment(Qt.AlignCenter)
+            ver_label.setStyleSheet("color: #bbb; font-size: 10px;")
+            ver_label.setToolTip("当前版本号（唯一来源 version.py）")
+            layout.addWidget(ver_label)
         return sidebar
 
     def _build_parse_page(self):
@@ -122,7 +138,11 @@ class ImageDownloaderApp(QMainWindow):
         self.url_input.installEventFilter(self)
         input_row.addWidget(self.url_input, 1)
 
-        self.paste_btn = QPushButton("粘贴链接")
+        self.paste_btn = QPushButton("粘贴HTML")
+        self.paste_btn.setToolTip(
+            "从剪贴板读入**整篇网页源码**（浏览器里 Ctrl+U 全选复制的那种）。\n"
+            "链接直接在左边输入框里粘贴即可，不需要这个按钮。"
+        )
         self.paste_btn.setMinimumHeight(32); self.paste_btn.setMaximumHeight(32)
         self.paste_btn.clicked.connect(self._on_paste_html)
         input_row.addWidget(self.paste_btn)
@@ -186,14 +206,11 @@ class ImageDownloaderApp(QMainWindow):
         self.filter_square_cb.setStyleSheet("font-size: 12px; color: #666;")
         action_row.addWidget(self.filter_square_cb)
 
+        # 全选/取消全选合成一个按钮，文案随当前状态切换（少一个按钮，窄窗口也放得下）
         self.select_all_btn = QPushButton("全选"); self.select_all_btn.setEnabled(False)
-        self.select_all_btn.clicked.connect(lambda: self._toggle_all(True))
+        self.select_all_btn.setToolTip("选中/取消选中当前所有可下载的图（重复图不参与批量选择）")
+        self.select_all_btn.clicked.connect(self._on_select_all_clicked)
         action_row.addWidget(self.select_all_btn)
-
-        self.deselect_all_btn = QPushButton("取消全选"); self.deselect_all_btn.setEnabled(False)
-        self.deselect_all_btn.clicked.connect(lambda: self._toggle_all(False))
-        action_row.addWidget(self.deselect_all_btn)
-        action_row.addSpacing(20)
 
         fmt_label = QLabel("保存为"); fmt_label.setStyleSheet("font-size: 12px; color: #666;")
         action_row.addWidget(fmt_label)
@@ -233,7 +250,23 @@ class ImageDownloaderApp(QMainWindow):
         self.thumb_strip = QVBoxLayout(self.thumb_container)
         self.thumb_strip.setContentsMargins(8, 8, 8, 8)
         self.thumb_strip.setSpacing(6)
-        self.thumb_strip.addStretch()
+        # 用显式 spacer 而不是 addStretch()：新图要插到它前面，
+        # 底部还要挂一个「已隐藏 N 张小图」的按钮，两者都不能被插入顺序搞乱
+        self._strip_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        self.thumb_strip.addSpacerItem(self._strip_spacer)
+
+        # 被过滤掉的图原来是"凭空消失"，用户不知道拦了什么 —— 给个可点开的入口
+        self.hidden_btn = QPushButton("")
+        self.hidden_btn.setCursor(Qt.PointingHandCursor)
+        self.hidden_btn.setStyleSheet(
+            "QPushButton { border: 1px dashed #d9d9d9; border-radius: 4px; color: #888;"
+            " font-size: 11px; padding: 4px 2px; background: #fff; }"
+            "QPushButton:hover { border-color: #1677ff; color: #1677ff; }"
+        )
+        self.hidden_btn.clicked.connect(self._on_toggle_hidden)
+        self.hidden_btn.setVisible(False)
+        self.thumb_strip.addWidget(self.hidden_btn)
+
         self.thumb_scroll.setWidget(self.thumb_container)
         content_row.addWidget(self.thumb_scroll)
 
@@ -252,6 +285,14 @@ class ImageDownloaderApp(QMainWindow):
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #333;")
         header.addWidget(title)
         header.addStretch()
+
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("搜索链接 / 保存路径 / 状态")
+        self.history_search.setClearButtonEnabled(True)
+        self.history_search.setFixedWidth(240)
+        self.history_search.textChanged.connect(lambda _: self._refresh_history())
+        header.addWidget(self.history_search)
+
         clear_btn = QPushButton("清空历史")
         clear_btn.setStyleSheet("color: #ff4d4f; font-size: 12px;")
         clear_btn.clicked.connect(self._on_clear_history)
@@ -316,7 +357,8 @@ class ImageDownloaderApp(QMainWindow):
         self._preview_index = -1
         self.download_btn.setEnabled(False)
         self.select_all_btn.setEnabled(False)
-        self.deselect_all_btn.setEnabled(False)
+        self.select_all_btn.setText("全选")
+        self._update_hidden_hint()
         # 解析中按钮转为「取消解析」并保持可点 —— 若禁用就没法中止长文章的解析
         self.parse_btn.setEnabled(True)
         self.parse_btn.setText("取消解析")
@@ -356,8 +398,8 @@ class ImageDownloaderApp(QMainWindow):
             item.checkbox.setChecked(False)
             item.checkbox.blockSignals(False)
             item.set_visible_state(False)
-        # 插入到 stretch 之前
-        self.thumb_strip.insertWidget(self.thumb_strip.count() - 1, item)
+        # 插到 spacer 之前：所有缩略图之后、「已隐藏 N 张」按钮之前
+        self.thumb_strip.insertWidget(self.thumb_strip.indexOf(self._strip_spacer), item)
         self.thumb_items.append(item)
         # 第一张图自动预览
         if self._preview_index < 0 and not info.is_mini_square and not info.is_duplicate:
@@ -365,6 +407,7 @@ class ImageDownloaderApp(QMainWindow):
             item.set_highlight(True)
             self.preview.show_image(info.data)
         self._update_download_btn()
+        self._update_hidden_hint()
 
     def _on_block_size(self, info, category, size):
         """右键菜单屏蔽此尺寸：写入 JSON + 立即重新过滤当前结果"""
@@ -381,6 +424,7 @@ class ImageDownloaderApp(QMainWindow):
                 if self.filter_square_cb.isChecked():
                     item.set_visible_state(False)
         self._update_download_btn()
+        self._update_hidden_hint()
         self.status.showMessage(
             f"已屏蔽 {w}×{h}（本页命中 {hit} 张）—— 下次解析遇到该尺寸会自动过滤"
         )
@@ -420,14 +464,15 @@ class ImageDownloaderApp(QMainWindow):
         if was_cancelled:
             text = "已取消 — " + text
         self.info_label.setText(text)
-        self.status.showMessage(
-            text + ("；已下载的照样可以勾选保存"
-                   if was_cancelled else " — 勾选后点击「下载选中图片」")
-        )
+        # 状态栏不再复述统计信息（原来顶部信息栏与状态栏显示的是同一句话）
+        if was_cancelled:
+            self.status.showMessage("已取消解析，已下载的图照样可以勾选保存")
+        else:
+            self.status.showMessage("解析完成，勾选右侧图片后点「下载选中图片」")
         self.select_all_btn.setEnabled(True)
-        self.deselect_all_btn.setEnabled(True)
         self.sort_cb.setEnabled(True)
         self._update_download_btn()
+        self._update_hidden_hint()
 
         if self._last_parsed_url:
             self._current_history_id = history_manager.add(
@@ -451,11 +496,36 @@ class ImageDownloaderApp(QMainWindow):
             self._current_history_id = None
         QMessageBox.warning(self, "解析失败", msg)
 
+    def _selectable_items(self):
+        """参与批量选择/下载的图：被过滤掉的和重复图都不算"""
+        return [it for it in self.thumb_items if not it.filtered_out and not it.info.is_duplicate]
+
     def _toggle_all(self, checked):
-        for item in self.thumb_items:
-            if not item.filtered_out and not item.info.is_duplicate:
-                item.set_checked(checked)
+        for item in self._selectable_items():
+            item.set_checked(checked)
         self._update_download_btn()
+
+    def _on_select_all_clicked(self):
+        """一个按钮两用：已全选则取消全选，否则全选（文案由 _update_download_btn 同步）"""
+        selectable = self._selectable_items()
+        all_on = bool(selectable) and all(it.checkbox.isChecked() for it in selectable)
+        self._toggle_all(not all_on)
+
+    def _update_hidden_hint(self):
+        """缩略图条底部提示：被过滤了多少张、点一下能看回来"""
+        n = sum(1 for it in self.thumb_items if it.info.is_mini_square)
+        if not n:
+            self.hidden_btn.setVisible(False)
+            return
+        if self.filter_square_cb.isChecked():
+            self.hidden_btn.setText(f"已隐藏 {n} 张小图/装饰\n点此显示")
+        else:
+            self.hidden_btn.setText(f"正在显示 {n} 张小图/装饰\n点此隐藏")
+        self.hidden_btn.setVisible(True)
+
+    def _on_toggle_hidden(self):
+        """切换「过滤小图与装饰」——保持单一数据源，不自己另存一份状态"""
+        self.filter_square_cb.setChecked(not self.filter_square_cb.isChecked())
 
     def _on_filter_toggled(self, checked):
         for item in self.thumb_items:
@@ -467,6 +537,7 @@ class ImageDownloaderApp(QMainWindow):
             if current.filtered_out:
                 self._preview_next_visible()
         self._update_download_btn()
+        self._update_hidden_hint()
 
     def _preview_next_visible(self):
         """切换到下一张可见图预览"""
@@ -495,12 +566,16 @@ class ImageDownloaderApp(QMainWindow):
         for item in self.thumb_items:
             self.thumb_strip.removeWidget(item)
         for item in self.thumb_items:
-            self.thumb_strip.insertWidget(self.thumb_strip.count() - 1, item)
+            self.thumb_strip.insertWidget(self.thumb_strip.indexOf(self._strip_spacer), item)
 
     def _update_download_btn(self):
         count = sum(1 for item in self.thumb_items if not item.filtered_out and item.checkbox.isChecked())
         self.download_btn.setEnabled(count > 0)
         self.download_btn.setText(f"下载选中图片 ({count})")
+        # 全选按钮的文案跟着勾选状态走，省掉一个「取消全选」按钮
+        selectable = self._selectable_items()
+        all_on = bool(selectable) and all(it.checkbox.isChecked() for it in selectable)
+        self.select_all_btn.setText("取消全选" if all_on else "全选")
 
     def _on_download(self):
         folder = QFileDialog.getExistingDirectory(self, "选择保存目录")
@@ -571,10 +646,28 @@ class ImageDownloaderApp(QMainWindow):
         QMessageBox.warning(self, "保存失败", msg)
 
     def _clear_thumbnails(self):
-        while self.thumb_strip.count() > 1:  # 保留最后的 stretch
-            item = self.thumb_strip.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        """只清缩略图：spacer 与底部的「已隐藏 N 张」按钮要留着"""
+        for item in self.thumb_items:
+            self.thumb_strip.removeWidget(item)
+            item.setParent(None)
+            item.deleteLater()
+        self.thumb_items.clear()
+        self._preview_index = -1
+
+    def eventFilter(self, obj, event):
+        """输入框里按回车直接解析（占位提示写的 Ctrl+Enter 也照旧可用）。
+
+        注意本方法必须存在：只调 `installEventFilter(self)` 而没有实现，
+        Qt 会退回 QObject.eventFilter 直接返回 False —— 等于装了个没用的过滤器，
+        这也是本文件里早先残留的一处死代码。
+        """
+        if obj is getattr(self, 'url_input', None) and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
+                event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)
+            ):
+                self._on_parse()
+                return True
+        return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
         """关窗前等后台线程收尾。
@@ -656,11 +749,44 @@ class ImageDownloaderApp(QMainWindow):
     #  历史页逻辑
     # ================================================================
 
+    @staticmethod
+    def _short_url(url):
+        """URL 列只留尾部 ID —— 反正全是 mp.weixin.qq.com/s/ 开头，前缀白占大半列宽"""
+        u = url or ""
+        for prefix in ("https://mp.weixin.qq.com/s/", "http://mp.weixin.qq.com/s/"):
+            if u.startswith(prefix):
+                return u[len(prefix):]
+        return u
+
     def _refresh_history(self):
         entries = history_manager.get_all(limit=200)
+        keyword = self.history_search.text().strip().lower()
+        if keyword:
+            # 状态既比对显示文案（中文「失败」）也比对原始值（failed），
+            # 用户按哪种搜都能命中
+            entries = [
+                e for e in entries
+                if keyword in (e.source_url or "").lower()
+                or keyword in (e.save_path or "").lower()
+                or keyword in e.status_text().lower()
+                or keyword in (e.status or "").lower()
+            ]
+
+        if not entries:
+            self.history_table.setRowCount(1)
+            tip = "没有匹配的记录" if keyword else "还没有记录 —— 去「解析」页解析一篇文章试试"
+            empty = QTableWidgetItem(tip)
+            empty.setForeground(QColor("#999"))
+            empty.setTextAlignment(Qt.AlignCenter)
+            self.history_table.setItem(0, 0, empty)
+            self.history_table.setSpan(0, 0, 1, 6)
+            self.history_table.setRowHeight(0, 40)
+            return
+
+        self.history_table.clearSpans()
         self.history_table.setRowCount(len(entries))
         for row, entry in enumerate(entries):
-            url_item = QTableWidgetItem(entry.source_url[:100])
+            url_item = QTableWidgetItem(self._short_url(entry.source_url)[:100])
             url_item.setToolTip(entry.source_url)
             url_item.setData(Qt.UserRole, entry.id)
             self.history_table.setItem(row, 0, url_item)
