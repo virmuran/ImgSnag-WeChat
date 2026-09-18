@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QSize, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage, QFont, QAction, QCursor
 
 from .worker import ImageInfo
+from .blocked_config import reason_label
 
 
 SIDEBAR_WIDTH = 72
@@ -157,15 +158,24 @@ class ThumbnailItem(QFrame):
         ]
         if self.info.is_duplicate:
             lines.append(f"与第 {self.info.dup_of + 1} 张重复")
-        if self.info.is_mini_square:
+        reasons = getattr(self.info, "block_reasons", ())
+        if reasons:
+            # 说清楚「是被哪一条拦下的」—— 否则用户只看到一张图不见了，
+            # 想放回来还得去猜是哪条规则（其中一条是他在历史页能撤销的屏蔽）
+            lines.append("被「过滤小图与装饰」拦下：")
+            lines.extend(f"  · {reason_label(r)}" for r in reasons)
+        elif self.info.is_mini_square:
             lines.append("被「过滤小图与装饰」判定为小图/装饰")
         lines.append(self.info.url)
         return "\n".join(lines)
 
     def _update_badge(self):
         """角标：重复图淡黄边框几乎看不出，加个文字角标才认得出来"""
+        reasons = getattr(self.info, "block_reasons", ())
         if self.info.is_duplicate:
             text = "重复"
+        elif any(r.startswith("blocked:") for r in reasons):
+            text = "已屏蔽"      # 与「小图」区分开：这条是用户自己屏蔽的，可以去历史页撤销
         elif self.info.is_mini_square:
             text = "小图"
         else:
@@ -239,6 +249,24 @@ class ThumbnailItem(QFrame):
         self.setVisible(visible)
         if not visible:
             self.set_checked(False)
+
+    def refresh_filter_state(self, filter_enabled: bool, check_on_show: bool = False):
+        """规则变了（例如用户刚撤销一条屏蔽）→ 重新决定这张该隐藏还是显示。
+
+        早期只有「隐藏」这一条路：一旦被拦就再也回不来，工具栏那个开关也只是把它
+        重新显示出来、不带任何判定。现在撤销屏蔽后要能原样退回，并且**回退的那张直接
+        勾上** —— 用户撤销屏蔽的本意就是「这些我要下」，让他再一张张点一遍是白费力气。
+        """
+        visible = not (filter_enabled and self.info.is_mini_square)
+        self.filtered_out = not visible
+        self.setVisible(visible)
+        if not visible:
+            self.set_checked(False)
+        elif check_on_show and not self.info.is_duplicate:
+            self.set_checked(True)
+        self._update_badge()
+        self._update_style()
+        self.setToolTip(self._tooltip_text())
 
 
 class ImageViewer(QScrollArea):

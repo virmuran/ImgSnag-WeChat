@@ -135,27 +135,44 @@ def main():
     # ---- 3. 解析完成（注入 8 张假图，含 1 张重复 1 张被判小图） ----
     infos = build_article_infos()
     infos[3].is_duplicate = True
-    infos[5].is_mini_square = True          # 模拟被「过滤小图」拦掉
+    # 模拟被「过滤小图」拦掉：一条是启发式（小图），一条是用户自己屏蔽过的尺寸
+    infos[5].is_mini_square = True
+    infos[6].is_mini_square = True
+    infos[6].block_reasons = ('blocked:cover',)
     win._reset_before_parse()
     for i, info in enumerate(infos):
         win._on_image_loaded(i, info)
     win._on_all_done(infos)
     if win.thumb_items:
         win._on_thumb_clicked(infos[1])       # 预览第 2 张（大竖图）
-    shot(win, os.path.join(outdir, '03_解析完成_1100x750.png'), '8 张，含重复/小图')
+    shot(win, os.path.join(outdir, '03_解析完成_1100x750.png'), '8 张，含重复/已屏蔽/小图')
 
     # ---- 4. 同样的内容放大到最大化窗口 ----
     win.resize(1500, 950)
     shot(win, os.path.join(outdir, '04_解析完成_1500x950.png'), '模拟最大化')
 
-    # ---- 5. 历史页（伪造数据） ----
+    # ---- 5. 历史页（伪造历史行 + 伪造屏蔽表） ----
+    from web_image_dl.blocked_config import blocked_config
+
     real_get_all = app_mod.history_manager.get_all
+    saved_cfg_path = blocked_config.config_path
+    shot_cfg = os.path.join(tempfile.mkdtemp(prefix='imgsnag_shot_'), 'blocked_sizes.json')
     app_mod.history_manager.get_all = lambda limit=200: fake_history_rows()
+    blocked_config.config_path = shot_cfg          # 别把假规则写进用户真实的屏蔽表
+    blocked_config.reload()
     try:
+        blocked_config.add_blocked('ui', (321, 192))
+        blocked_config.add_blocked('avatar', (272, 272))
+        blocked_config.add_blocked('cover', (1080, 460))
+        blocked_config.add_hits({('ui', 321, 192): 14, ('avatar', 272, 272): 6,
+                                 ('cover', 1080, 460): 2})
         win._switch_page(1)
-        shot(win, os.path.join(outdir, '05_历史页.png'), '伪造 4 行（未动真实历史库）')
+        shot(win, os.path.join(outdir, '05_历史页.png'),
+             '伪造 4 行 + 已屏蔽尺寸面板（未动真实历史库与真实屏蔽表）')
     finally:
         app_mod.history_manager.get_all = real_get_all
+        blocked_config.config_path = saved_cfg_path
+        blocked_config.reload()
 
     # ---- 6. 窄窗口，看会不会挤坏 ----
     win._switch_page(0)

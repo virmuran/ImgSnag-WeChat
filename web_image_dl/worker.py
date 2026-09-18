@@ -14,7 +14,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
 from .extractor import extract_image_urls, to_compressed_url
-from .blocked_config import blocked_config
+from .blocked_config import blocked_config, classify
 
 
 HEADERS = {
@@ -38,9 +38,17 @@ class ImageInfo:
     height: int = 0
     ext: str = ".jpg"
     is_mini_square: bool = False
+    has_alpha: bool = False      # 原图是否带透明通道（判定「排版装饰」要用）
+    #: 命中的「该隐藏」规则名，见 blocked_config.classify。界面撤销屏蔽时按它重算
+    block_reasons: tuple = ()
     original_url: str = ""       # 原图地址（/0）
     fallback_url: str = ""       # 压缩版地址（/640）
     used_original: bool = True   # 实际下载的是否为原图
+
+    def classify_reasons(self, blocked_sets=None) -> tuple:
+        """按统一规则重算这张图该不该藏（界面撤销屏蔽后调它）"""
+        return classify(self.width, self.height, self.ext, len(self.data),
+                        self.has_alpha, blocked_sets)
 
 
 class FetchWorker(QThread):
@@ -116,6 +124,7 @@ class FetchWorker(QThread):
             images = []
             # 从配置加载屏蔽尺寸（支持热更新：右键屏蔽后下次解析立即生效）
             _UI_EXACT, _AVATAR_EXACT, _COVER_EXACT = blocked_config.get_blocked_sets()
+            hit_counter = {}          # {(分类, 宽, 高): 命中张数}，解析收尾时一次性落盘
 
             for i, url in enumerate(urls):
                 if self._cancelled:
@@ -145,30 +154,24 @@ class FetchWorker(QThread):
                         fallback_url=candidates[-1],
                         used_original=(used_url == url),
                     )
-                    max_dim, min_dim = max(w, h), min(w, h)
-                    size_key = (w, h)
-
-                    # ── 从 JSON 加载的精确命中尺寸表（blocked_config.get_blocked_sets()）──
-                    is_ui_exact = size_key in _UI_EXACT
-                    is_avatar_exact = size_key in _AVATAR_EXACT
-                    is_cover_exact = size_key in _COVER_EXACT
-
-                    # ── 兜底规则 ──
-                    # 小图（最长边 ≤ 200px）
-                    is_small = max_dim <= 200 and min_dim > 0
-                    # 微信 UI 装饰（RGBA 透明 PNG + 文件 <10KB，不限尺寸）
-                    is_ui_noise = (
-                        ext == ".png"
-                        and img.hasAlphaChannel()
-                        and len(data) < 10_000
-                    )
-
-                    if is_small or is_ui_noise or is_ui_exact or is_avatar_exact or is_cover_exact:
-                        info.is_mini_square = True
+                    # 判定规则只在 blocked_config.classify 里写一份：界面撤销屏蔽后
+                    # 要用同一套规则重算，两处各写一份迟早对不上（旧版就是这么散的）
+                    has_alpha = img.hasAlphaChannel()
+                    reasons = classify(w, h, ext, len(data), has_alpha,
+                                       (_UI_EXACT, _AVATAR_EXACT, _COVER_EXACT))
+                    info.has_alpha = has_alpha
+                    info.block_reasons = reasons
+                    info.is_mini_square = bool(reasons)
+                    for r in reasons:
+                        if r.startswith("blocked:"):
+                            k = (r.split(":", 1)[1], w, h)
+                            hit_counter[k] = hit_counter.get(k, 0) + 1
                     images.append(info)
                     self.image_loaded.emit(i, info)
                 except Exception as e:
                     print(f"  skip [{i}] {url[:80]}... : {e}")
+
+            blocked_config.add_hits(hit_counter)
 
             hash_groups = {}
             for info in images:

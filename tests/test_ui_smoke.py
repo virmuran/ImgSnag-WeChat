@@ -47,6 +47,16 @@
    用户实测后认定：直接按住左键拖比「按住空格再拖」好用得多。于是空格降为备选，
    「能拖」这件事改由光标自己常驻表达（图超出视口即张开的手），几何提示也不再挂在
    空格上 —— 否则用户永远发现不了左键能拖。
+
+九、v1.5.0 屏蔽尺寸变成双向门 + 界面记事（UI-20 / UI-21）
+   旧的 add_blocked 是单向门：右键误屏蔽一个尺寸，那类图从此静默消失，既看不到
+   屏蔽了哪些尺寸、也没有撤销入口，普通用户只能认为图丢了。现在历史页底部有
+   「已屏蔽的尺寸」面板：列得出分类/尺寸/命中次数，能逐条恢复也能全部恢复，撤销后
+   当前页面里被它拦下的图当场放回来并勾上。
+   另一半是持久化：全项目此前零 QSettings，排序/保存格式/两个开关/窗口大小位置/
+   上次保存目录每次启动都回到默认，现由 web_image_dl/settings.py 统一记住。
+   注意：这两块测试都会读写配置，所以走 _isolated_config 把配置指到临时目录，
+   绝不碰用户真实的 blocked_sizes.json 与注册表。
 """
 import os
 import sys
@@ -246,6 +256,38 @@ def test_download_through_gui(app):
     # 界面状态要复位，否则用户看到的是永远停在「保存中」的按钮
     eq(win.download_btn.text(), '下载选中图片 (3)', '保存结束后按钮文案复位')
     check(win.download_btn.isEnabled(), '保存结束后按钮恢复可用')
+
+
+class _isolated_config:
+    """把用户配置临时改到临时目录。
+
+    blocked_config 与 QSettings 都是模块级单例，测试如果直接用，会**读写用户真实的**
+    %APPDATA%/ImgSnagWeChat/blocked_sizes.json 和注册表 —— 跑一遍测试就把用户攒下的
+    屏蔽规则清掉、把窗口尺寸改掉，是最难察觉的那种副作用。这里用临时文件顶替，
+    退出时原样切回去（config_path 是实例属性，所以 app/worker 里引用的那个单例
+    也会跟着走临时文件）。
+    """
+
+    def __enter__(self):
+        import tempfile
+
+        from web_image_dl.blocked_config import blocked_config
+        from web_image_dl.settings import settings
+
+        self.dir = tempfile.mkdtemp(prefix='imgsnag_iso_')
+        self._blocked = blocked_config
+        self._settings = settings
+        self._saved_path = blocked_config.config_path
+        blocked_config.config_path = os.path.join(self.dir, 'blocked_sizes.json')
+        blocked_config.reload()
+        settings.use_ini_file(os.path.join(self.dir, 'settings.ini'))
+        return self
+
+    def __exit__(self, *exc):
+        self._blocked.config_path = self._saved_path
+        self._blocked.reload()
+        self._settings.use_default_store()
+        return False
 
 
 def _fake_infos(count=3):
@@ -881,6 +923,173 @@ def test_pan_real_path(app):
        '真实路径下光标回到张开的手（图仍超出视口）')
 
 
+def test_blocked_panel(app):
+    """P0：屏蔽尺寸曾经是「单向门」—— 误屏蔽一个尺寸，那类图从此静默消失，
+    面板上既看不到是哪些尺寸、也没有撤销入口，只能去手改 JSON 文件。
+    这里从右键回调一路走到面板上的「恢复」按钮，钉住「可逆」这件事。"""
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    from web_image_dl.app import ImageDownloaderApp
+    from web_image_dl.blocked_config import blocked_config
+
+    print('\n[UI-20] 「已屏蔽的尺寸」面板：看得见、撤得掉')
+    with _isolated_config():
+        win = ImageDownloaderApp()
+        win.show()
+        QApplication.processEvents()
+
+        eq(blocked_config.count(), 0, '起手屏蔽表为空（用的是临时配置，不碰真实用户数据）')
+        # 用 isHidden 而不是 isVisible：历史页此刻不是 QStackedWidget 的当前页，
+        # 整页都算「不可见」，isVisible 恒为 False，只有显式隐藏才是我们要断言的
+        check(not win.blocked_empty.isHidden(), '空的时候说明去哪儿屏蔽')
+        check(win.blocked_scroll.isHidden(), '空的时候不占地方')
+        check(win.blocked_clear_btn.isHidden(), '空的时候没有「全部恢复」')
+        eq(win.blocked_title.text(), '已屏蔽的尺寸', '标题不显示多余的 (0)')
+
+        infos = _fake_infos(3)
+        for i, info in enumerate(infos):
+            win._on_image_loaded(i, info)
+        QApplication.processEvents()
+        eq(len(win.thumb_items), 3, '3 张图进缩略图区')
+
+        # 右键菜单最终调的就是这个回调
+        win._on_block_size(infos[0], 'ui', (infos[0].width, infos[0].height))
+        QApplication.processEvents()
+
+        rows = blocked_config.list_blocked()
+        eq(blocked_config.count(), 1, '屏蔽表里多了一条')
+        eq((rows[0]['category'], rows[0]['width'], rows[0]['height']),
+           ('ui', 1200, 800), '记下的正是这张图的尺寸与分类')
+        eq(rows[0]['hits'], 1, '当场被过滤掉的那张也计入「已过滤 N 张」')
+        check(win.thumb_items[0].filtered_out, '被屏蔽的那张立刻隐藏')
+        eq(win.thumb_items[0].badge.text(), '已屏蔽',
+           '角标写明「已屏蔽」（与笼统的「小图」区分开，用户才知道能去历史页撤）')
+        check('屏蔽' in win.thumb_items[0].toolTip(), 'tooltip 说清是被哪条规则拦下的')
+        eq(win.blocked_title.text(), '已屏蔽的尺寸 (1)', '面板标题给出条数')
+        check(not win.blocked_scroll.isHidden(), '有内容时列表显示出来')
+        check(not win.blocked_clear_btn.isHidden(), '有内容时出现「全部恢复」')
+        check(win.blocked_empty.isHidden(), '有内容时空状态提示让位')
+
+        row_w = win.blocked_rows.itemAt(0).widget()
+        check(row_w is not None, '面板里出现了那一行')
+        undo = [b for b in row_w.findChildren(QPushButton) if b.text() == '恢复']
+        eq(len(undo), 1, '那一行带一个「恢复」按钮')
+        undo[0].click()          # 走真实点击 → 槽函数
+        QApplication.processEvents()
+
+        eq(blocked_config.count(), 0, '恢复后屏蔽表清空')
+        check(not win.thumb_items[0].filtered_out, '被它拦下的图当场放回来')
+        check(win.thumb_items[0].isVisible(), '放回来是真的显示出来了')
+        check(win.thumb_items[0].checkbox.isChecked(),
+              '放回来的图直接勾上 —— 撤销屏蔽的本意就是「这些我要下」')
+        check(not win.blocked_empty.isHidden(), '面板回到空状态')
+
+        # 「全部恢复」
+        win._on_block_size(infos[1], 'avatar', (infos[1].width, infos[1].height))
+        win._on_block_size(infos[2], 'cover', (infos[2].width, infos[2].height))
+        QApplication.processEvents()
+        eq(blocked_config.count(), 2, '又屏蔽两条')
+        eq([r['category'] for r in blocked_config.list_blocked()], ['avatar', 'cover'],
+           '两条分别归到各自分类')
+
+        orig_q = QMessageBox.question
+        QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+        try:
+            win.blocked_clear_btn.click()
+            QApplication.processEvents()
+        finally:
+            QMessageBox.question = orig_q
+
+        eq(blocked_config.count(), 0, '「全部恢复」清空了屏蔽表')
+        eq(blocked_config.list_blocked(), [], '列表也空了')
+        check(not win.thumb_items[1].filtered_out and not win.thumb_items[2].filtered_out,
+              '两条屏蔽拦下的图都放回来了')
+        check(win.thumb_items[1].checkbox.isChecked() and win.thumb_items[2].checkbox.isChecked(),
+              '放回来的两张都勾上了')
+        check(not win.blocked_empty.isHidden() and win.blocked_scroll.isHidden(),
+              '面板回到空状态')
+
+        # 用户点「取消」时不许清空
+        win._on_block_size(infos[0], 'ui', (infos[0].width, infos[0].height))
+        QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.No)
+        try:
+            win.blocked_clear_btn.click()
+            QApplication.processEvents()
+        finally:
+            QMessageBox.question = orig_q
+        eq(blocked_config.count(), 1, '确认框选「否」时屏蔽表原样保留')
+
+        win.close()
+        QApplication.processEvents()
+
+
+def test_settings_persist(app):
+    """P1：旧版全项目零 QSettings —— 排序方式、保存格式、两个开关、窗口大小位置
+    每次启动都回到默认，连保存目录也每次都从「文档」开始。这里钉住「记事了」。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    from web_image_dl.app import ImageDownloaderApp
+    from web_image_dl.settings import K_FORMAT, K_LAST_SAVE_DIR, settings
+
+    print('\n[UI-21] 界面状态与保存目录会被记住')
+    with _isolated_config():
+        win = ImageDownloaderApp()
+        win.show()
+        QApplication.processEvents()
+        # 尺寸刻意选在离屏平台那块 800×800 的屏幕之内：Qt 的 restoreGeometry 会把
+        # 窗口裁进可用屏幕，用 1100×750 以上的尺寸会被裁到 798×774，看起来像「没记住」，
+        # 其实记忆是好的（同一个 QByteArray 在 1920×1080 的机器上原样还原）
+        win.resize(720, 640)
+        QApplication.processEvents()
+        win.sort_cb.setCurrentIndex(2)
+        win.fmt_cb.setCurrentIndex(1)                 # JPG
+        win.filter_square_cb.setChecked(False)
+        win.original_cb.setChecked(False)
+        settings.set(K_LAST_SAVE_DIR, r'C:\Windows')
+        win._save_settings()
+        QApplication.processEvents()
+
+        win2 = ImageDownloaderApp()
+        win2.show()
+        QApplication.processEvents()
+        eq(win2.sort_cb.currentIndex(), 2, '排序方式被记住')
+        eq(win2.fmt_cb.currentText(), 'JPG', '保存格式被记住')
+        eq(win2.filter_square_cb.isChecked(), False, '「过滤小图与装饰」开关被记住')
+        eq(win2.original_cb.isChecked(), False, '「原图画质」开关被记住')
+        check(abs(win2.width() - 720) <= 4, f'窗口宽度被记住（实测 {win2.width()}）')
+        check(abs(win2.height() - 640) <= 4, f'窗口高度被记住（实测 {win2.height()}）')
+        check((win2.width(), win2.height()) != (1100, 750),
+              '确实来自上次的几何信息，而不是 __init__ 里的默认 resize')
+        eq(win2._last_save_dir(), r'C:\Windows', '上次保存的目录被记住')
+
+        # 保存对话框要真的从那个目录打开
+        seen = {}
+        orig_dialog = QFileDialog.getExistingDirectory
+        QFileDialog.getExistingDirectory = staticmethod(
+            lambda parent, title, start='': (seen.setdefault('start', start), '')[1]
+        )
+        try:
+            win2._on_download()
+        finally:
+            QFileDialog.getExistingDirectory = orig_dialog
+        eq(seen.get('start'), r'C:\Windows', '保存对话框从上次的目录开始，不用重新导航')
+
+        # 目录被删了 → 回落到系统默认，而不是弹一个不存在的路径
+        settings.set(K_LAST_SAVE_DIR, r'C:\__imgsnag_not_exist__')
+        eq(win2._last_save_dir(), '', '上次的目录已不存在时回落到系统默认')
+
+        # 存坏的下拉值不能让启动崩掉
+        settings.set(K_FORMAT, 'TIFF（不是个选项）')
+        win3 = ImageDownloaderApp()
+        QApplication.processEvents()
+        eq(win3.fmt_cb.currentText(), '原格式', '存坏的下拉值回落默认值，不崩')
+
+        win2.close()
+        win3.close()
+        win.close()
+        QApplication.processEvents()
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     test_preview_scale(app)
@@ -899,6 +1108,8 @@ def main():
     test_pan_guards(app)
     test_pan_real_path(app)
     test_direct_drag_is_primary(app)
+    test_blocked_panel(app)
+    test_settings_persist(app)
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QScrollArea, QCheckBox, QLabel,
     QProgressBar, QFileDialog, QMessageBox, QStatusBar, QTextEdit,
     QComboBox, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QSizePolicy, QSpacerItem,
+    QHeaderView, QAbstractItemView, QSizePolicy, QSpacerItem, QFrame,
 )
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QColor
@@ -24,6 +24,10 @@ from .blocked_config import blocked_config
 from .extractor import is_wechat_url
 from .file_utils import unique_path
 from .save_worker import SaveWorker
+from .settings import (
+    settings, K_GEOMETRY, K_WINDOW_STATE, K_SORT_INDEX,
+    K_FILTER_SMALL, K_PREFER_ORIGINAL, K_FORMAT, K_LAST_SAVE_DIR,
+)
 
 try:
     from version import VERSION
@@ -44,13 +48,16 @@ class ImageDownloaderApp(QMainWindow):
         self._last_parsed_url = ""
         self._current_history_id = None
         self._pending_history_id = None
+        self.settings = settings
 
         # 右键屏蔽回调
         ThumbnailItem.on_block_size = self._on_block_size
 
         self._build_ui()
         self._apply_style()
+        self._restore_settings()
         self._refresh_history()
+        self._refresh_blocked()
 
     # ================================================================
     #  UI Building
@@ -199,7 +206,8 @@ class ImageDownloaderApp(QMainWindow):
             "  • 透明的 PNG 且小于 10KB（微信排版用的装饰图）\n"
             "  • 你右键点过「屏蔽此尺寸」的尺寸 —— 学到的规则会在下次解析自动生效\n"
             "隐藏只是不显示、不勾选，不会删掉任何文件；\n"
-            "取消勾选就能把这些图重新显示出来再挑。"
+            "取消勾选就能把这些图重新显示出来再挑；\n"
+            "屏蔽过的尺寸在「历史」页底部列着，随时可以逐条恢复或全部恢复。"
         )
         self.filter_square_cb.setChecked(True)
         self.filter_square_cb.toggled.connect(self._on_filter_toggled)
@@ -318,7 +326,217 @@ class ImageDownloaderApp(QMainWindow):
         self.history_table.verticalHeader().setVisible(False)
         root.addWidget(self.history_table, 1)
 
+        root.addWidget(self._build_blocked_panel())
+
         return page
+
+    def _build_blocked_panel(self):
+        """历史页底部的「已屏蔽的尺寸」面板。
+
+        这个面板本身就是修复：旧的 add_blocked 是**单向门** —— 在缩略图上右键误屏蔽
+        一个尺寸之后，那类图从此静默消失，既看不到屏蔽了哪些尺寸、也没有任何撤销入口，
+        只能去手改 %APPDATA%/ImgSnagWeChat/blocked_sizes.json。对目标用户（普通用户）
+        而言等于「图丢了」。这里把它变成双向的：列得出来、撤销得掉、还看得到命中多少张。
+        """
+        panel = QFrame()
+        panel.setObjectName("blockedPanel")
+        panel.setStyleSheet(
+            "#blockedPanel { background: #fafafa; border: 1px solid #ececec; border-radius: 6px; }"
+        )
+        box = QVBoxLayout(panel)
+        box.setContentsMargins(10, 8, 10, 8)
+        box.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.blocked_title = QLabel("已屏蔽的尺寸")
+        self.blocked_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #333; border: none;")
+        head.addWidget(self.blocked_title)
+
+        self.blocked_sub = QLabel("")
+        self.blocked_sub.setStyleSheet("font-size: 11px; color: #999; border: none;")
+        head.addWidget(self.blocked_sub)
+        head.addStretch()
+
+        self.blocked_clear_btn = QPushButton("全部恢复")
+        self.blocked_clear_btn.setToolTip("清空屏蔽表 —— 所有被屏蔽过的尺寸重新参与解析")
+        self.blocked_clear_btn.setStyleSheet(
+            "QPushButton { font-size: 11px; color: #ff4d4f; border: 1px solid #ffccc7;"
+            " border-radius: 4px; background: #fff; padding: 2px 10px; }"
+            "QPushButton:hover { border-color: #ff4d4f; }"
+        )
+        self.blocked_clear_btn.clicked.connect(self._on_clear_blocked)
+        head.addWidget(self.blocked_clear_btn)
+        box.addLayout(head)
+
+        self.blocked_empty = QLabel(
+            "还没有屏蔽任何尺寸。在缩略图上点右键可以屏蔽它的尺寸，"
+            "之后解析遇到同类尺寸会按你教的规则自动过滤 —— 在这里随时可以撤销。"
+        )
+        self.blocked_empty.setWordWrap(True)
+        self.blocked_empty.setStyleSheet("font-size: 11px; color: #999; border: none;")
+        box.addWidget(self.blocked_empty)
+
+        self.blocked_scroll = QScrollArea()
+        self.blocked_scroll.setWidgetResizable(True)
+        self.blocked_scroll.setFrameShape(QFrame.NoFrame)
+        self.blocked_scroll.setMaximumHeight(126)
+        self.blocked_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.blocked_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        self.blocked_rows = QVBoxLayout(inner)
+        self.blocked_rows.setContentsMargins(0, 0, 0, 0)
+        self.blocked_rows.setSpacing(4)
+        self.blocked_rows.addStretch()          # 末尾占位：新行插到它前面
+        self.blocked_scroll.setWidget(inner)
+        box.addWidget(self.blocked_scroll)
+        return panel
+
+    #: 分类标签的配色，让「哪一类」一眼分得开
+    _CAT_COLORS = {"ui": "#8c8c8c", "avatar": "#722ed1", "cover": "#fa8c16"}
+
+    def _make_blocked_row(self, row: dict):
+        """一条屏蔽记录：分类 + 尺寸 + 命中次数 + 「恢复」按钮"""
+        cat = row["category"]
+        color = self._CAT_COLORS.get(cat, "#8c8c8c")
+
+        line = QWidget()
+        line.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(line)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        tag = QLabel(row["category_label"])
+        tag.setStyleSheet(
+            f"font-size: 10px; color: {color}; border: 1px solid {color};"
+            " border-radius: 3px; padding: 0 5px; background: #fff;"
+        )
+        h.addWidget(tag)
+
+        size_lbl = QLabel(f"{row['width']}×{row['height']}")
+        size_lbl.setStyleSheet("font-size: 12px; color: #333;")
+        size_lbl.setMinimumWidth(86)
+        h.addWidget(size_lbl)
+
+        hits = row["hits"]
+        hit_lbl = QLabel(f"已过滤 {hits} 张" if hits else "尚未命中")
+        hit_lbl.setStyleSheet(
+            "font-size: 11px; color: %s;" % ("#fa8c16" if hits else "#bbb")
+        )
+        hit_lbl.setToolTip(
+            "这条规则一共拦下过多少张图（含屏蔽当下在页面里立刻过滤掉的那些）"
+        )
+        h.addWidget(hit_lbl)
+
+        added = (row.get("added_at") or "")[:10]
+        if added:
+            when = QLabel(f"· {added} 加入")
+            when.setStyleSheet("font-size: 11px; color: #bbb;")
+            h.addWidget(when)
+
+        h.addStretch()
+
+        undo = QPushButton("恢复")
+        undo.setCursor(Qt.PointingHandCursor)
+        undo.setToolTip(
+            f"撤销这条屏蔽：{row['width']}×{row['height']} 的图以后不再被自动过滤，\n"
+            "当前页面里被它拦下的图会立刻放回来并勾上"
+        )
+        undo.setStyleSheet(
+            "QPushButton { font-size: 11px; color: #1677ff; border: 1px solid #91caff;"
+            " border-radius: 4px; background: #fff; padding: 1px 10px; }"
+            "QPushButton:hover { border-color: #1677ff; }"
+        )
+        undo.clicked.connect(
+            lambda _=False, c=cat, w=row["width"], hh=row["height"]: self._on_unblock(c, w, hh)
+        )
+        h.addWidget(undo)
+        return line
+
+    def _refresh_blocked(self):
+        """重建「已屏蔽的尺寸」面板（条数很少，直接全量重建最不容易出错）"""
+        rows = blocked_config.list_blocked()
+
+        while self.blocked_rows.count() > 1:        # 末尾的 stretch 留着
+            item = self.blocked_rows.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for row in rows:
+            self.blocked_rows.insertWidget(self.blocked_rows.count() - 1, self._make_blocked_row(row))
+
+        total = len(rows)
+        self.blocked_title.setText(f"已屏蔽的尺寸 ({total})" if total else "已屏蔽的尺寸")
+        self.blocked_sub.setText("下次解析遇到这些尺寸会自动过滤，点「恢复」即可撤销" if total else "")
+        self.blocked_scroll.setVisible(bool(total))
+        self.blocked_clear_btn.setVisible(bool(total))
+        self.blocked_empty.setVisible(not total)
+
+    def _reevaluate_filters(self) -> int:
+        """屏蔽表变了 → 用同一套规则把当前每张图重新判一遍，返回新放回来的张数。
+
+        判定走 blocked_config.classify（与 worker 共用一份），所以界面显示和解析结果
+        不会说两套话：取消屏蔽后仍该藏起来的（比如它本来就够小）会继续藏着。
+
+        新被拦下的张数当场记进统计 —— 用户在面板上看到的「已过滤 N 张」要包括刚刚
+        眼睁睁看着消失的那几张，否则一屏蔽完面板写「尚未命中」，等于自相矛盾。
+        """
+        blocked_sets = blocked_config.get_blocked_sets()
+        enabled = self.filter_square_cb.isChecked()
+        changed = back = 0
+        new_hits = {}
+        for item in self.thumb_items:
+            info = item.info
+            old = tuple(info.block_reasons)
+            reasons = info.classify_reasons(blocked_sets)
+            if reasons == old:
+                continue
+            was_hidden = info.is_mini_square
+            info.block_reasons = reasons
+            info.is_mini_square = bool(reasons)
+            item.refresh_filter_state(enabled, check_on_show=was_hidden and not reasons)
+            changed += 1
+            if was_hidden and not reasons:
+                back += 1
+            for r in set(reasons) - set(old):
+                if r.startswith("blocked:"):
+                    k = (r.split(":", 1)[1], info.width, info.height)
+                    new_hits[k] = new_hits.get(k, 0) + 1
+        if changed:
+            self._update_download_btn()
+            self._update_hidden_hint()
+        blocked_config.add_hits(new_hits)
+        return back
+
+    def _on_unblock(self, category: str, width: int, height: int):
+        """撤销一条屏蔽，并把当前结果里被它拦掉的图当场放回来 —— 撤销要立刻看得见"""
+        if not blocked_config.remove_blocked(category, (width, height)):
+            self.status.showMessage("这条屏蔽已经不存在了")
+            self._refresh_blocked()
+            return
+        back = self._reevaluate_filters()
+        self._refresh_blocked()
+        msg = f"已恢复 {width}×{height}"
+        msg += f" —— 本页放回 {back} 张" if back else "（当前页面没有被它拦下的图）"
+        self.status.showMessage(f"{msg}，下次解析不再过滤该尺寸")
+
+    def _on_clear_blocked(self):
+        rows = blocked_config.list_blocked()
+        if not rows:
+            return
+        reply = QMessageBox.question(
+            self, "确认",
+            f"恢复全部 {len(rows)} 条被屏蔽的尺寸？\n恢复后这些尺寸的图不再被自动过滤。",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        n = blocked_config.clear_blocked()
+        back = self._reevaluate_filters()
+        self._refresh_blocked()
+        self.status.showMessage(f"已恢复 {n} 条屏蔽，本页放回 {back} 张")
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -338,12 +556,54 @@ class ImageDownloaderApp(QMainWindow):
             QTextEdit { border: 1px solid #d9d9d9; border-radius: 6px; padding: 8px; font-size: 12px; }
         """)
 
+    # ================================================================
+    #  界面偏好持久化
+    # ================================================================
+
+    def _restore_settings(self):
+        """把上次退出时的界面状态装回去。
+
+        这些选项以前一个都不记住：每次启动都要重新选排序、重设保存格式、重新勾选过滤
+        开关，窗口还得重新拖到顺手的大小。用户对这类细节的感受就是「这软件不记事」。
+        """
+        geo = self.settings.value(K_GEOMETRY)
+        if geo is not None:
+            self.restoreGeometry(geo)
+        state = self.settings.value(K_WINDOW_STATE)
+        if state is not None:
+            self.restoreState(state)
+
+        idx = self.settings.get(K_SORT_INDEX)
+        if isinstance(idx, int) and 0 <= idx < self.sort_cb.count():
+            self.sort_cb.blockSignals(True)
+            self.sort_cb.setCurrentIndex(idx)
+            self.sort_cb.blockSignals(False)
+
+        fmt_idx = self.fmt_cb.findText(self.settings.get(K_FORMAT))
+        if fmt_idx >= 0:
+            self.fmt_cb.setCurrentIndex(fmt_idx)
+
+        # 两个复选框默认值为 True，值相同不会触发信号，值不同才需要重新过滤一遍
+        self.filter_square_cb.setChecked(bool(self.settings.get(K_FILTER_SMALL)))
+        self.original_cb.setChecked(bool(self.settings.get(K_PREFER_ORIGINAL)))
+
+    def _save_settings(self):
+        """退出时落盘。几何信息用 QByteArray 原样存，别自己拆成四个数字"""
+        self.settings.set_value(K_GEOMETRY, self.saveGeometry())
+        self.settings.set_value(K_WINDOW_STATE, self.saveState())
+        self.settings.set(K_SORT_INDEX, self.sort_cb.currentIndex())
+        self.settings.set(K_FORMAT, self.fmt_cb.currentText())
+        self.settings.set(K_FILTER_SMALL, self.filter_square_cb.isChecked())
+        self.settings.set(K_PREFER_ORIGINAL, self.original_cb.isChecked())
+        self.settings.sync()
+
     def _switch_page(self, index):
         self.stack.setCurrentIndex(index)
         self.btn_parse.setChecked(index == 0)
         self.btn_history.setChecked(index == 1)
         if index == 1:
             self._refresh_history()
+            self._refresh_blocked()
 
     # ================================================================
     #  解析页核心逻辑
@@ -410,23 +670,22 @@ class ImageDownloaderApp(QMainWindow):
         self._update_hidden_hint()
 
     def _on_block_size(self, info, category, size):
-        """右键菜单屏蔽此尺寸：写入 JSON + 立即重新过滤当前结果"""
+        """右键菜单屏蔽此尺寸：写入 JSON + 立即重新过滤当前结果
+
+        过滤交给 _reevaluate_filters 而不是就地改标志位：会命中的规则可能不止一条
+        （比如这张图本来就小），让统一的那份规则去算才不会出现「屏蔽前后表现不一致」。
+        """
         if not blocked_config.add_blocked(category, size):
             self.status.showMessage(f"尺寸 {size[0]}×{size[1]} 已在屏蔽列表中")
             return
 
+        self._reevaluate_filters()
+        self._refresh_blocked()
         w, h = size
-        hit = 0
-        for item in self.thumb_items:
-            if (item.info.width, item.info.height) == size:
-                item.info.is_mini_square = True
-                hit += 1
-                if self.filter_square_cb.isChecked():
-                    item.set_visible_state(False)
-        self._update_download_btn()
-        self._update_hidden_hint()
+        hit = sum(1 for it in self.thumb_items if (it.info.width, it.info.height) == size)
         self.status.showMessage(
-            f"已屏蔽 {w}×{h}（本页命中 {hit} 张）—— 下次解析遇到该尺寸会自动过滤"
+            f"已屏蔽 {w}×{h}（本页命中 {hit} 张）—— 下次解析遇到该尺寸会自动过滤，"
+            f"「历史」页底部可以撤销"
         )
 
     def _on_thumb_clicked(self, info):
@@ -473,6 +732,7 @@ class ImageDownloaderApp(QMainWindow):
         self.sort_cb.setEnabled(True)
         self._update_download_btn()
         self._update_hidden_hint()
+        self._refresh_blocked()      # 命中次数变了，屏蔽面板跟着更新
 
         if self._last_parsed_url:
             self._current_history_id = history_manager.add(
@@ -577,10 +837,19 @@ class ImageDownloaderApp(QMainWindow):
         all_on = bool(selectable) and all(it.checkbox.isChecked() for it in selectable)
         self.select_all_btn.setText("取消全选" if all_on else "全选")
 
+    def _last_save_dir(self) -> str:
+        """上次保存目录；已经不在了就回空串（交给系统默认位置，别弹个不存在的路径）"""
+        d = self.settings.get(K_LAST_SAVE_DIR)
+        return d if d and os.path.isdir(d) else ""
+
     def _on_download(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择保存目录")
+        # 从上次存过的地方接着存：以前每次都从「文档」开始，一套图集存多次就得反复导航
+        folder = QFileDialog.getExistingDirectory(self, "选择保存目录", self._last_save_dir())
         if not folder:
             return
+        if folder != self.settings.get(K_LAST_SAVE_DIR):
+            self.settings.set(K_LAST_SAVE_DIR, folder)
+            self.settings.sync()
         fmt_map = {"原格式": "", "JPG": ".jpg", "PNG": ".png", "WebP": ".webp"}
         fmt = fmt_map.get(self.fmt_cb.currentText(), "")
 
@@ -680,6 +949,7 @@ class ImageDownloaderApp(QMainWindow):
             self.worker.wait(3000)
         if self.save_worker is not None and self.save_worker.isRunning():
             self.save_worker.wait(5000)   # 落盘不做半途中断，等它写完
+        self._save_settings()
         super().closeEvent(event)
 
     def _start_worker(self, source, is_url):
