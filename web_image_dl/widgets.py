@@ -256,15 +256,21 @@ class ImageViewer(QScrollArea):
     而不是永远从左上角长出来。做法是把鼠标位置反算成原图坐标，缩放后重设滚动条，
     让那个点在视口里的位置保持不变（见 _center_on）。
 
-    拖动：图片放大到超出视口后，**直接按住左键拖**或**按住空格 + 左键拖**都能平移
-    （中键也可以）。两个要点：
+    拖动：图片放大到超出视口后，**直接按住左键拖**就行（中键也可以）。按住空格再拖
+    属于备选姿势 —— 习惯「先抓手再拖」的人会用，但**不再需要**它。唯一一条几何前提：
+    图必须超出视口。整张图都装在窗口里时，往哪边拖都没有被挡住的画面可以露出来，
+    所以按下去不会有反应 —— 但会在右下角提示「先放大再拖」，并且告诉用户可以直接拖，
+    免得按半天毫无反应让人以为坏了（见 _mouse_press）。
 
-    1. 能不能拖是几何决定的：图必须超出视口。整张图都装在窗口里时，往哪边拖都没有
-       被挡住的画面可以露出来，所以空格不会被抢走 —— 但会在右下角提示「先放大再拖」，
-       免得按半天毫无反应让人以为坏了（见 _handle_space_key）。
-    2. 空格键挂在应用级过滤器上（见 _handle_space_key）：只装在本控件上收不到，焦点
-       通常在别的控件（输入框/按钮）手里。判断「指针是否在预览区」用 Qt 自己的
-       Enter/Leave 状态（under_mouse），不去问系统要屏幕坐标，缩放/多屏下更稳。
+    左键拖动的体验细节：
+
+    - 起步门槛 PAN_START_SLOP：按下后移动不到 4px 就松开，算单击，画面一点都不动 ——
+      否则点一下选图会把图带歪一两像素。拖起来之后不回弹，也不会「先歪一下再跟手」。
+    - 光标就是提示：只要图超出视口，不按任何键也挂一只张开的手（见 _update_pan_cursor）。
+      这是「能直接拖」唯一的可见信号 —— 别再让它依赖按空格。
+    - 指针位置用 Qt 自己的 Enter/Leave 状态（under_mouse）判断，不去问系统要屏幕坐标，
+      缩放/多屏下更稳。空格键仍挂在应用级过滤器上（见 _handle_space_key）：只装在本
+      控件上收不到，焦点通常在别的控件（输入框/按钮）手里。
     """
     ZOOM_MIN = 0.05
     ZOOM_MAX = 8.0
@@ -362,7 +368,7 @@ class ImageViewer(QScrollArea):
             "③  右侧勾选，点「下载选中图片」"
             "\n\n"
             "预览：Ctrl+滚轮缩放（以鼠标位置为中心）· 双击切 100%\n"
-            "放大超出窗口后：直接左键拖动，或按住空格 + 拖动"
+            "放大超出窗口后：直接按住左键拖动（按住空格拖也行）"
         ))
         self._fit_placeholder()
 
@@ -574,13 +580,17 @@ class ImageViewer(QScrollArea):
         """此刻能不能拖：指针压在预览区上 + 图确实超出了视口。
 
         注意这里**不看键盘焦点**。早先加过「焦点在文本框里就不给拖」的守卫，结果
-        用户在链接框里点一下就再也拖不动了，而且按空格毫无反应 —— 那个守卫本意是
-        别把正在输入的空格吃掉，但指针就压在预览区上时，用户显然是想拖图，不是想打字。
+        用户在链接框里点一下就再也拖不动了，而且毫无反馈 —— 那个守卫本意是别把正在
+        输入的空格吃掉，但指针就压在预览区上时，用户显然是想拖图，不是想打字。
         """
         return self.under_mouse() and self._has_overflow()
 
     def _handle_space_key(self, event) -> bool:
-        """空格按下/松开 → 进入/退出可拖动状态。返回 True 表示事件已被吃掉。"""
+        """空格按下/松开 → 备选的「抓手」姿势。返回 True 表示事件已被吃掉。
+
+        直接左键就能拖之后，空格已经不是必需的了 —— 但习惯「先抓手再拖」的人还会按它，
+        所以保留：按住空格期间光标一样是张开的手，松开空格结束拖动。
+        """
         if event.key() != Qt.Key_Space:
             return False
         if event.modifiers() not in (Qt.NoModifier, Qt.KeypadModifier):
@@ -617,9 +627,14 @@ class ImageViewer(QScrollArea):
         self._update_pan_cursor()
 
     def _update_pan_cursor(self):
-        if self._panning:
+        """光标：拖动中握拳；否则只要「有得拖」就挂一只张开的手。
+
+        这里不再要求「按住空格」—— 直接左键就能拖了，光标就是唯一的提示。
+        唯一保留的关键是：图超出视口才给手形，装得下时保持箭头（没得拖，别骗人）。
+        """
+        if self._panning or self._pending_pan:
             shape = Qt.ClosedHandCursor
-        elif self._space_held and self._pan_available():
+        elif self._has_overflow():
             shape = Qt.OpenHandCursor
         else:
             shape = None
@@ -647,11 +662,19 @@ class ImageViewer(QScrollArea):
                 return False
             self._begin_pan(event, pending=False)   # 中键拖动：不用按空格，随按随拖
             return True
-        if button != Qt.LeftButton or not self._pan_available():
+        if button != Qt.LeftButton:
             return False
-        # 空格+左键：意图明确，立刻开始拖
-        # 光是左键：先记下起点，走够 PAN_START_SLOP 才算拖（否则单击/双击会被带歪）
-        self._begin_pan(event, pending=not self._space_held)
+        if not self._has_overflow():
+            # 图装得下就是没得拖，按下去也不会有反应 —— 直接说出来，别让人反复试。
+            # 有图才提示；空状态引导里已经写过一遍了，不必重复。
+            if not self._source.isNull() and self._text_input_focused() is False:
+                self._flash_hint("整图已全部可见 · 先 Ctrl+滚轮放大再拖")
+            return False
+        if not self.under_mouse():
+            return False
+        # 先记下起点，走够 PAN_START_SLOP 才算拖。不能按下就拖：那样双击切 100%
+        # 会被两次微小的位移带歪，单击也会让画面跳一两像素。
+        self._begin_pan(event, pending=True)
         return True
 
     def _begin_pan(self, event, pending: bool):
@@ -709,6 +732,9 @@ class ImageViewer(QScrollArea):
         if etype == QEvent.MouseButtonPress:
             if self._mouse_press(event):
                 return True
+            # 没走成拖动时落到 super()，事件照常继续派发 —— 不要在这里把事件
+            # 手动 sendEvent 给 preview_label：过滤器同时装在 viewport 和 label 上，
+            # 在过滤器里发事件会立刻重新进这个过滤器，当场递归爆栈（试过，26MB 堆栈）。
         elif etype == QEvent.MouseMove:
             if self._pan_step(event):
                 return True

@@ -42,6 +42,11 @@
    b) 图没超出视口时「没得拖」是几何决定的，但旧版一声不响 —— 现在会给出
       「先 Ctrl+滚轮放大再拖」的提示。另外补了不按空格直接左键拖动（带起步门槛，
       免得单击/双击把画面带歪）和中键拖动。
+
+八、v1.4.0 「直接左键拖」升为主路径
+   用户实测后认定：直接按住左键拖比「按住空格再拖」好用得多。于是空格降为备选，
+   「能拖」这件事改由光标自己常驻表达（图超出视口即张开的手），几何提示也不再挂在
+   空格上 —— 否则用户永远发现不了左键能拖。
 """
 import os
 import sys
@@ -587,7 +592,7 @@ def test_space_pan(app):
     viewer.set_zoom(2.0)
     QApplication.processEvents()
     eq(viewer._pan_available(), True, '放大到超出视口后可以拖')
-    check(viewer._handle_space_key(space_press) is True, '空格被拦截（进入拖动待命）')
+    check(viewer._handle_space_key(space_press) is True, '空格被拦住（备选的抓手姿势）')
     check(viewer._space_held is True, '已进入拖动待命状态')
     eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor, '光标变成张开的手，提示可以拖')
 
@@ -603,15 +608,16 @@ def test_space_pan(app):
         QEvent.MouseButtonPress, QPointF(start), QPointF(g0),
         Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
     QApplication.processEvents()
-    check(viewer._panning is True, '按下左键进入拖动中')
-    eq(viewer.viewport().cursor().shape(), Qt.ClosedHandCursor, '拖动中光标变成握拳')
-
+    # v1.4.0 起按住空格也不再「按下即拖」：空格只是让光标一直保持张开的手，
+    # 起步仍统一走 PAN_START_SLOP 门槛，免得单击/双击被带歪。
+    check(viewer._pending_pan is True, '按下左键进入待起步（空格不再改变门槛）')
     move = QPoint(start.x() - 120, start.y() - 80)
     gm = viewer.viewport().mapToGlobal(move)
     app.sendEvent(viewer.preview_label, QMouseEvent(
         QEvent.MouseMove, QPointF(move), QPointF(gm),
         Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
     QApplication.processEvents()
+    check(viewer._panning is True, '越过门槛后进入拖动中')
     eq(viewer.horizontalScrollBar().value(), h0 + 120, '向左拖 → 内容跟手（横向 +120）')
     eq(viewer.verticalScrollBar().value(), v0 + 80, '向上拖 → 内容跟手（纵向 +80）')
 
@@ -622,10 +628,13 @@ def test_space_pan(app):
     check(viewer._panning is False, '松开左键结束拖动')
     check(viewer._handle_space_key(space_release) is True, '松开空格退出待命状态')
     check(viewer._space_held is False, '空格状态已复位')
-    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '光标恢复成箭头')
+    # 空格松了、图仍超出视口 → 光标回到「张开的手」。v1.3.x 这里退回箭头，
+    # 等于把「能拖」的信号收走了；v1.4.0 直接左键就能拖，光标必须常驻。
+    eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor,
+       '松开空格后仍是张开的手（图还超出视口，直接拖随时成立）')
 
-    # 不按空格、直接用左键拖，也要能平移 —— 用户反馈的「拖不动」重点在这儿。
-    # 但得走够门槛才算拖：轻轻一抖当点击，免得单击/双击把画面带歪。
+    # 不按空格、直接用左键拖 —— v1.4.0 起这是**主路径**（用户实测定论：比按空格好用），
+    # 空格降级为备选。但得走够门槛才算拖：轻轻一抖当点击，免得单击/双击把画面带歪。
     h1 = viewer.horizontalScrollBar().value()
     app.sendEvent(viewer.preview_label, QMouseEvent(
         QEvent.MouseButtonPress, QPointF(start), QPointF(g0),
@@ -651,7 +660,95 @@ def test_space_pan(app):
         Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
     QApplication.processEvents()
     check(viewer._panning is False, '松开事件落在别处也能正常结束拖动')
-    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '光标复位')
+    eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor, '光标回到张开的手（仍有得拖）')
+
+
+def test_direct_drag_is_primary(app):
+    """v1.4.0：「直接左键拖」是主路径，空格降为备选。
+
+    用户实测结论是**不按空格更好用**。所以「能拖」这件事不能再靠按空格才显现 ——
+    否则用户根本没理由去试左键。这里钉三件事：
+      a) 图超出视口时，一个键都不按，光标就是张开的手；
+      b) 图装得下时按下左键会给出「先放大再拖」的提示，而不是静默无反应；
+      c) 反复按左键不会卡状态、不抛异常（过滤器里手动转发事件会递归爆栈，不能这么干）。
+    """
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    from web_image_dl.widgets import ImageViewer
+
+    print('\n[UI-19] 直接左键拖 = 主路径（空格降为备选）')
+    viewer = ImageViewer()
+    viewer.resize(900, 700)
+    viewer.show()
+    QApplication.processEvents()
+    viewer.under_mouse = lambda: True          # 离屏环境光标位置没法摆
+
+    # a) 还没放图：没得拖 → 箭头
+    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '空状态不给手形（没得拖）')
+
+    viewer.show_image(png_bytes(2000, 1500))
+    QApplication.processEvents()
+    eq(viewer._has_overflow(), False, '适应窗口下整图都在视口内')
+    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '装得下就不给手形 —— 光标不许骗人')
+
+    viewer.set_zoom(2.0)
+    QApplication.processEvents()
+    eq(viewer._has_overflow(), True, '放大后图超出视口')
+    eq(viewer._space_held, False, '前置条件：一个键都没按')
+    eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor,
+       '不按任何键，光标就是张开的手 —— 「能直接拖」唯一的可见信号')
+    eq(viewer.preview_label.cursor().shape(), Qt.OpenHandCursor, 'label 上也是手形')
+
+    # b) 图装得下时按左键 → 提示「先放大再拖」。v1.3.x 只在按空格时提示，
+    #    而用户根本不会去按空格，于是「点了没反应」。
+    viewer.fit_to_window()
+    QApplication.processEvents()
+    viewer._update_zoom_label()
+    QApplication.processEvents()
+    eq(viewer._has_overflow(), False, '回到适应窗口')
+
+    o = QPoint(400, 350)
+    go = viewer.viewport().mapToGlobal(o)
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseButtonPress, QPointF(o), QPointF(go),
+        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.processEvents()
+    check(viewer._pending_pan is False and viewer._panning is False,
+          '没得拖时不进入任何拖动状态')
+    check('放大' in viewer.zoom_label.text(),
+          f'左键点下去要说清「先放大再拖」：{viewer.zoom_label.text()!r}')
+    check(viewer.zoom_label.isVisible(), '提示真的显示出来了')
+
+    # c) 过滤器绝不能把事件「手动转发」给同一个控件 —— 过滤器装在 viewport 和
+    #    label 两层上，在过滤器里 sendEvent 会立刻重新进这个过滤器并递归爆栈
+    #    （试过：26MB 的 RecursionError 堆栈 + 测试挂死）。这条用「跑完不炸」钉住。
+    viewer.set_zoom(2.0)
+    QApplication.processEvents()
+    app.sendEvent(viewer.viewport(), QMouseEvent(
+        QEvent.MouseButtonPress, QPointF(o), QPointF(go),
+        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.processEvents()
+    check(viewer._pending_pan is True, '有得拖时进入待起步状态')
+    app.sendEvent(viewer.viewport(), QMouseEvent(
+        QEvent.MouseButtonRelease, QPointF(o), QPointF(go),
+        Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+    QApplication.processEvents()
+    check(viewer._pending_pan is False, '松开后待起步状态复位（没卡在拖动里）')
+
+    # 没得拖时连按几次：不许抛异常、不许卡状态
+    viewer.fit_to_window()
+    QApplication.processEvents()
+    for _ in range(3):
+        app.sendEvent(viewer.viewport(), QMouseEvent(
+            QEvent.MouseButtonPress, QPointF(o), QPointF(go),
+            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        app.sendEvent(viewer.viewport(), QMouseEvent(
+            QEvent.MouseButtonRelease, QPointF(o), QPointF(go),
+            Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+        QApplication.processEvents()
+    check(viewer._pending_pan is False and viewer._panning is False,
+          '没得拖时反复按左键不会卡进拖动状态，也没有异常（防递归）')
 
 
 def test_pan_guards(app):
@@ -688,7 +785,7 @@ def test_pan_guards(app):
         check(viewer._space_held is True, '进入拖动待命')
         QApplication.processEvents()
         eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor,
-           '手形光标必须出来 —— 这是「能拖」的唯一可见信号')
+           '手形光标必须出来 —— 「能拖」的可见信号（v1.4.0 起不按空格也是手形）')
 
         # 焦点在文本框里也真的能拖起来
         viewer._set_scroll(200, 200)
@@ -780,7 +877,8 @@ def test_pan_real_path(app):
     QTest.mouseRelease(viewer.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(360, 330))
     QApplication.processEvents()
     check(viewer._panning is False, '真实路径下松开结束拖动')
-    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '真实路径下光标复位')
+    eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor,
+       '真实路径下光标回到张开的手（图仍超出视口）')
 
 
 def main():
@@ -800,6 +898,7 @@ def main():
     test_space_pan(app)
     test_pan_guards(app)
     test_pan_real_path(app)
+    test_direct_drag_is_primary(app)
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:
