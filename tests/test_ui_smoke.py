@@ -33,8 +33,15 @@
    放大到超出视口后按空格可以拖动。
    空间关系类的修复只能靠几何断言钉住：断言鼠标下的那个原图像素缩放前后仍停在原地，
    以及拖动 N 像素后滚动条恰好走了 N 像素。
-   空格是**应用级**过滤器拦的（焦点在别的控件上），所以必须同时钉住"不该拦的时候别拦"：
-   图没超出视口、焦点在文本框里这两种情况都要放行，否则会把用户正在输入的空格吃掉。
+
+七、v1.3.1 「有时候拖得动、有时候拖不动」
+   两条真因，都钉在用例里：
+   a) 焦点在文本框里就整段不给拖（用户在链接框点一下就废了，而且毫无反馈）。
+      现改为**指针位置说了算**：指针压在预览区上就归预览区，在别处才放行空格。
+      指针不在预览区时打字的空格必须照常进输入框。
+   b) 图没超出视口时「没得拖」是几何决定的，但旧版一声不响 —— 现在会给出
+      「先 Ctrl+滚轮放大再拖」的提示。另外补了不按空格直接左键拖动（带起步门槛，
+      免得单击/双击把画面带歪）和中键拖动。
 """
 import os
 import sys
@@ -563,8 +570,19 @@ def test_space_pan(app):
     space_release = QKeyEvent(QEvent.KeyRelease, Qt.Key_Space, Qt.NoModifier)
 
     eq(viewer._pan_available(), False, '图还在窗口里装得下 → 没什么可拖')
-    check(viewer._handle_space_key(space_press) is False, '此时空格照常放行（没抢用户的空格）')
-    check(viewer._space_held is False, '没进入拖动待命状态')
+    # 指针压在预览区上但确实没得拖：吃掉空格（免得飘进输入框），并且把原因说出来。
+    # 旧版这里悄悄放行、界面上毫无反应，用户只会以为拖动功能坏了。
+    check(viewer._handle_space_key(space_press) is True, '指针在预览区上 → 空格归预览区处理')
+    check(viewer._space_held is True, '进入待命（此时按下不会动，但会给提示）')
+    check('放大' in viewer.zoom_label.text() and viewer.zoom_label.isVisible(),
+          f'右下角提示「先放大再拖」：{viewer.zoom_label.text()!r}')
+
+    # 指针不在预览区上（在别处、或正在打字）→ 空格必须原样放行
+    viewer._space_held = False
+    viewer._update_pan_cursor()
+    viewer.under_mouse = lambda: False
+    check(viewer._handle_space_key(space_press) is False, '指针不在预览区 → 不抢空格')
+    viewer.under_mouse = lambda: True
 
     viewer.set_zoom(2.0)
     QApplication.processEvents()
@@ -606,26 +624,44 @@ def test_space_pan(app):
     check(viewer._space_held is False, '空格状态已复位')
     eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '光标恢复成箭头')
 
-    # 没按空格时不能拖 —— 否则就是"点一下就乱滚"
+    # 不按空格、直接用左键拖，也要能平移 —— 用户反馈的「拖不动」重点在这儿。
+    # 但得走够门槛才算拖：轻轻一抖当点击，免得单击/双击把画面带歪。
     h1 = viewer.horizontalScrollBar().value()
     app.sendEvent(viewer.preview_label, QMouseEvent(
         QEvent.MouseButtonPress, QPointF(start), QPointF(g0),
         Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    tiny = QPoint(start.x() - 2, start.y())
+    app.sendEvent(viewer.preview_label, QMouseEvent(
+        QEvent.MouseMove, QPointF(tiny), QPointF(viewer.viewport().mapToGlobal(tiny)),
+        Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.processEvents()
+    eq(viewer.horizontalScrollBar().value(), h1, '只动 2px（门槛内）算点击，画面不动')
+    check(viewer._panning is False, '门槛内还没进入拖动状态')
+
     app.sendEvent(viewer.preview_label, QMouseEvent(
         QEvent.MouseMove, QPointF(move), QPointF(gm),
         Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
     QApplication.processEvents()
-    eq(viewer.horizontalScrollBar().value(), h1, '没按空格时拖不动（不会误滚）')
+    check(viewer._panning is True, '超过门槛后正式进入拖动')
+    eq(viewer.horizontalScrollBar().value(), h1 + 120, '不按空格、左键直接拖也能平移（+120）')
+
+    # 松开事件落到别的控件上也必须认账，否则状态卡在拖动中、光标一直握拳
+    app.sendEvent(viewer.zoom_label, QMouseEvent(
+        QEvent.MouseButtonRelease, QPointF(move), QPointF(gm),
+        Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+    QApplication.processEvents()
+    check(viewer._panning is False, '松开事件落在别处也能正常结束拖动')
+    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '光标复位')
 
 
 def test_pan_guards(app):
-    """应用级空格过滤器最容易误伤的地方：把用户正在输入的空格吃掉"""
-    from PySide6.QtCore import QEvent
-    from PySide6.QtGui import QKeyEvent
+    """空格归谁：看指针压在哪，不看键盘焦点在哪"""
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QKeyEvent, QMouseEvent
 
     from web_image_dl.app import ImageDownloaderApp
 
-    print('\n[UI-17] 不该拦空格的时候要放行')
+    print('\n[UI-17] 空格归谁：指针位置说了算')
     win = ImageDownloaderApp()
     win.show()
     QApplication.processEvents()
@@ -637,37 +673,114 @@ def test_pan_guards(app):
     viewer.set_zoom(1.5)
     QApplication.processEvents()
 
-    eq(viewer._pan_available(), True, '大图 + 鼠标在预览区 → 可以拖')
+    eq(viewer._pan_available(), True, '大图 + 指针在预览区 → 可以拖')
 
-    # 焦点在文本框里（用户在打字）时必须放行，否则输入的空格会莫名其妙消失。
-    # 这里改的是实例属性：给类赋 staticmethod 在 PySide6 生成的类型上不生效，
-    # 拿回来的还是裸函数，会被当成 self 传进去。
+    # 焦点在文本框里、但指针压在预览区上 → 用户是在拖图，空格归预览区。
+    # 旧版把「焦点不在文本框里」当成能拖的前提，结果用户在链接框里点一下之后
+    # 整段拖动就废了（手形光标不出来、按下去没反应），而且界面上毫无提示。
     viewer._text_input_focused = lambda: True
     try:
-        eq(viewer._pan_available(), False, '焦点在文本框里 → 不拦截')
+        eq(viewer._pan_available(), True,
+           '焦点在文本框里，指针在预览区上 → 照样能拖（旧版返回 False，整段废掉）')
         check(viewer._handle_space_key(
-            QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier)) is False,
-            '空格原样交给输入框')
+            QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier)) is True,
+            '指针在预览区上 → 空格归预览区（否则会飘进输入框且什么都不发生）')
+        check(viewer._space_held is True, '进入拖动待命')
+        QApplication.processEvents()
+        eq(viewer.viewport().cursor().shape(), Qt.OpenHandCursor,
+           '手形光标必须出来 —— 这是「能拖」的唯一可见信号')
+
+        # 焦点在文本框里也真的能拖起来
+        viewer._set_scroll(200, 200)
+        QApplication.processEvents()
+        h0 = viewer.horizontalScrollBar().value()
+        start = QPoint(300, 300)
+        g0 = viewer.viewport().mapToGlobal(start)
+        app.sendEvent(viewer.preview_label, QMouseEvent(
+            QEvent.MouseButtonPress, QPointF(start), QPointF(g0),
+            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        mv = QPoint(start.x() - 100, start.y())
+        app.sendEvent(viewer.preview_label, QMouseEvent(
+            QEvent.MouseMove, QPointF(mv), QPointF(viewer.viewport().mapToGlobal(mv)),
+            Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+        QApplication.processEvents()
+        eq(viewer.horizontalScrollBar().value(), h0 + 100,
+           '焦点在文本框里，按住空格拖也能平移')
+        app.sendEvent(viewer.preview_label, QMouseEvent(
+            QEvent.MouseButtonRelease, QPointF(mv), QPointF(mv),
+            Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+        QApplication.processEvents()
     finally:
         del viewer._text_input_focused
+    viewer._space_held = False
+    viewer._update_pan_cursor()
 
-    # 真在输入框里敲空格：字符必须真的进去
+    # 指针不在预览区：那才是真的在打字，空格必须原样进输入框
+    viewer.under_mouse = lambda: False
     win.url_input.setPlainText('')
     win.url_input.setFocus()
     QApplication.processEvents()
+    check(viewer._handle_space_key(
+        QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier)) is False,
+        '指针不在预览区 → 空格放行')
+    viewer._space_held = False
     if QApplication.focusWidget() is win.url_input:
         # 注意 text 参数不能省：QTextEdit 插入的是 event.text()，不带上就什么都不会进去
         app.sendEvent(win.url_input,
                       QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, ' '))
         QApplication.processEvents()
         eq(win.url_input.toPlainText(), ' ',
-           '链接框里的空格真的敲进去了（没被预览区的拖动逻辑吞掉）')
+           '链接框里的空格真的敲进去了（指针不在预览区时不会被吞）')
     else:
-        print('   （离屏环境拿不到输入焦点，这条跳过；上面的守卫断言已覆盖同一逻辑）')
+        print('   （离屏环境拿不到输入焦点，这条跳过；上面的放行断言已覆盖同一逻辑）')
 
-    win.parse_btn.setFocus()        # 焦点挪出文本框（按钮不是文本框）
+    viewer.under_mouse = lambda: True
+    win.parse_btn.setFocus()
     QApplication.processEvents()
-    eq(viewer._pan_available(), True, '焦点离开文本框后又能拖了')
+    eq(viewer._pan_available(), True, '指针回到预览区 → 又能拖了')
+
+
+def test_pan_real_path(app):
+    """拖动要经得起真实事件分发（窗口命中测试 + 「按住的控件」记账）。
+
+    UI-16/17 是把事件直接塞给 label 的，那条路绕开了 Qt 的命中测试：
+    真机上事件可能落在别处（比例指示器、滚动条、窗口外），坐标系也不同。
+    这里用 QTest 从窗口系统走一遍，确认拖动照样成立。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    from web_image_dl.widgets import ImageViewer
+
+    print('\n[UI-18] 拖动走真实事件路径（QTest → 窗口系统）')
+    viewer = ImageViewer()
+    viewer.resize(900, 700)
+    viewer.show()
+    QApplication.processEvents()
+    viewer.show_image(png_bytes(2000, 1500))
+    QApplication.processEvents()
+    viewer.under_mouse = lambda: True          # 离屏环境光标位置没法摆
+    viewer.set_zoom(2.0)
+    QApplication.processEvents()
+    viewer._set_scroll(400, 400)
+    QApplication.processEvents()
+
+    h0 = viewer.horizontalScrollBar().value()
+    v0 = viewer.verticalScrollBar().value()
+    QTest.mousePress(viewer.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(400, 350))
+    QApplication.processEvents()
+    check(viewer._pending_pan is True, '真实路径下左键按下被接住（还没过门槛）')
+
+    QTest.mouseMove(viewer.viewport(), QPoint(360, 330), 5)
+    QApplication.processEvents()
+    check(viewer._panning is True, '越过门槛后进入拖动')
+    eq(viewer.horizontalScrollBar().value(), h0 + 40, '真实路径下横向跟手 +40')
+    eq(viewer.verticalScrollBar().value(), v0 + 20, '真实路径下纵向跟手 +20')
+
+    QTest.mouseRelease(viewer.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(360, 330))
+    QApplication.processEvents()
+    check(viewer._panning is False, '真实路径下松开结束拖动')
+    eq(viewer.viewport().cursor().shape(), Qt.ArrowCursor, '真实路径下光标复位')
 
 
 def main():
@@ -686,6 +799,7 @@ def main():
     test_zoom_anchor(app)
     test_space_pan(app)
     test_pan_guards(app)
+    test_pan_real_path(app)
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

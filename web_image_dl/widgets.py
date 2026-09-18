@@ -256,15 +256,22 @@ class ImageViewer(QScrollArea):
     而不是永远从左上角长出来。做法是把鼠标位置反算成原图坐标，缩放后重设滚动条，
     让那个点在视口里的位置保持不变（见 _center_on）。
 
-    拖动：图片放大到超出视口后，**按住空格 + 左键拖动**可以平移，光标会变成手形。
-    空格键是应用级事件过滤器接的（见 _handle_space_key）—— 只装在本控件上收不到：
-    焦点通常在其他控件（输入框/按钮）手里，敲空格根本不会送到这里。为避免误伤，
-    只有「鼠标确实悬停在预览区」且「焦点不在文本框里」且「图真的超出视口」时才拦截，
-    其余情况原样放行。
+    拖动：图片放大到超出视口后，**直接按住左键拖**或**按住空格 + 左键拖**都能平移
+    （中键也可以）。两个要点：
+
+    1. 能不能拖是几何决定的：图必须超出视口。整张图都装在窗口里时，往哪边拖都没有
+       被挡住的画面可以露出来，所以空格不会被抢走 —— 但会在右下角提示「先放大再拖」，
+       免得按半天毫无反应让人以为坏了（见 _handle_space_key）。
+    2. 空格键挂在应用级过滤器上（见 _handle_space_key）：只装在本控件上收不到，焦点
+       通常在别的控件（输入框/按钮）手里。判断「指针是否在预览区」用 Qt 自己的
+       Enter/Leave 状态（under_mouse），不去问系统要屏幕坐标，缩放/多屏下更稳。
     """
     ZOOM_MIN = 0.05
     ZOOM_MAX = 8.0
     ZOOM_STEP = 1.25
+    #: 左键直接拖动时的起步门槛（像素）：小于它算单击，不算拖动，
+    #: 这样点一下选图、双击切 100% 都不会把画面带歪
+    PAN_START_SLOP = 4
     #: 单次渲染的像素上限。8 倍看着爽，但套在 2560×3413 的图上就是 5.6 亿像素、
     #: 一个 QPixmap 要吞 2GB 内存，会把程序直接撑爆 —— 所以按这张图的实际尺寸
     #: 反推一个安全的倍率上限（100% 永远保留，看原图像素是核心用途）。
@@ -295,15 +302,19 @@ class ImageViewer(QScrollArea):
         self._fit = True
         self._zoom = 1.0
 
-        # 空格拖拽的临时状态
+        # 拖动的临时状态。_pending_pan 是「左键按下了但还没走够门槛」——先当点击看待，
+        # 超过 PAN_START_SLOP 才算拖动（见 _pan_step）。
         self._space_held = False
         self._panning = False
+        self._pending_pan = False
         self._pan_origin = QPoint()
         self._pan_start_h = 0
         self._pan_start_v = 0
 
-        # 缩放比例指示器：挂在视口上（不随图片滚动），右下角常驻
+        # 缩放比例指示器：挂在视口上（不随图片滚动），右下角常驻。
+        # 必须让鼠标事件穿过去：它浮在图片上方，挡住的那一小块拖不动。
         self.zoom_label = QLabel(self.viewport())
+        self.zoom_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.zoom_label.setStyleSheet(
             "background: rgba(0,0,0,120); color: #fff; border-radius: 4px;"
             "font-size: 11px; padding: 2px 6px;"
@@ -315,6 +326,12 @@ class ImageViewer(QScrollArea):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(60)
         self._resize_timer.timeout.connect(self._apply_scale)
+
+        #: 「没得拖」这类一次性说明借右下角指示器的位置显示，2 秒后自动退回比例
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.setInterval(2200)
+        self._hint_timer.timeout.connect(self._update_zoom_label)
 
         # 事件交给子控件（label）接收，所以两个都要装过滤器
         self.preview_label.installEventFilter(self)
@@ -345,7 +362,7 @@ class ImageViewer(QScrollArea):
             "③  右侧勾选，点「下载选中图片」"
             "\n\n"
             "预览：Ctrl+滚轮缩放（以鼠标位置为中心）· 双击切 100%\n"
-            "放大超出窗口后：按住空格 + 拖动可平移"
+            "放大超出窗口后：直接左键拖动，或按住空格 + 拖动"
         ))
         self._fit_placeholder()
 
@@ -527,30 +544,40 @@ class ImageViewer(QScrollArea):
     # ---------- 空格拖拽平移 ----------
 
     def under_mouse(self) -> bool:
-        """鼠标是不是正压在预览区上"""
+        """鼠标是不是正压在预览区上。
+
+        用 Qt 自己维护的 Enter/Leave 状态（`underMouse()`），而不是拿屏幕坐标反算：
+        后者要求「系统给的指针坐标」和「控件映射」在同一套坐标系里，缩放/多屏下容易出错。
+        滚动条不算 viewport 的一部分，但指针压在滚动条上时也该能空格拖动，
+        所以再补一条「落在整个预览区矩形内」的兜底。
+        """
         if not self.isVisible():
             return False
-        return self.viewport().rect().contains(self.viewport().mapFromGlobal(QCursor.pos()))
+        if self.viewport().underMouse() or self.preview_label.underMouse():
+            return True
+        return self.rect().contains(self.mapFromGlobal(QCursor.pos()))
 
     @staticmethod
     def _text_input_focused() -> bool:
         return isinstance(QApplication.focusWidget(),
                           (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox))
 
-    def _pan_available(self) -> bool:
-        """此刻能不能拖。
-
-        三个条件缺一不可：鼠标确实在预览区上、焦点不在文本框里（否则会把用户正在
-        输入的空格吃掉，这是拦截全局空格键必须付的代价，所以判得严一点）、
-        图真的超出了视口（没超出就没得拖，空格就该正常传下去）。
-        """
-        if self._source.isNull() or not self.under_mouse():
-            return False
-        if self._text_input_focused():
+    def _has_overflow(self) -> bool:
+        """图片是否已经超出视口 —— 超出才有得拖"""
+        if self._source.isNull():
             return False
         vp = self.viewport().size()
         content = self.preview_label.size()
         return content.width() > vp.width() or content.height() > vp.height()
+
+    def _pan_available(self) -> bool:
+        """此刻能不能拖：指针压在预览区上 + 图确实超出了视口。
+
+        注意这里**不看键盘焦点**。早先加过「焦点在文本框里就不给拖」的守卫，结果
+        用户在链接框里点一下就再也拖不动了，而且按空格毫无反应 —— 那个守卫本意是
+        别把正在输入的空格吃掉，但指针就压在预览区上时，用户显然是想拖图，不是想打字。
+        """
+        return self.under_mouse() and self._has_overflow()
 
     def _handle_space_key(self, event) -> bool:
         """空格按下/松开 → 进入/退出可拖动状态。返回 True 表示事件已被吃掉。"""
@@ -561,8 +588,21 @@ class ImageViewer(QScrollArea):
         if event.type() == QEvent.KeyPress:
             if event.isAutoRepeat():
                 return self._space_held
-            if not self._space_held and not self._pan_available():
-                return False                  # 没什么可拖的时候不拦空格，免得影响正常操作
+            if self._space_held:
+                self._update_pan_cursor()     # 按住空格期间又缩放了，手形光标要跟上
+                return True
+            if self._source.isNull() or not self.under_mouse():
+                return False                  # 指针不在预览区上：这空格是用户在打字
+            if not self._has_overflow():
+                # 有图，但整张都装在窗口里 —— 没得拖。
+                # 这件事必须说出来：否则用户按半天空格毫无反应，只会以为拖动功能坏了。
+                if self._text_input_focused():
+                    return False              # 正在打字，不抢
+                self._flash_hint("整图已全部可见 · 先 Ctrl+滚轮放大再拖")
+                self._space_held = True       # 吃掉空格，免得它飘进输入框
+                self._update_pan_cursor()
+                return True
+            # 指针压在预览区上 → 用户是要拖图。焦点在哪个输入框都不影响这个判断
             self._space_held = True
             self._update_pan_cursor()
             return True
@@ -573,6 +613,7 @@ class ImageViewer(QScrollArea):
 
     def _end_pan(self):
         self._panning = False
+        self._pending_pan = False
         self._update_pan_cursor()
 
     def _update_pan_cursor(self):
@@ -587,6 +628,55 @@ class ImageViewer(QScrollArea):
                 w.unsetCursor()
             else:
                 w.setCursor(QCursor(shape))
+
+    def _flash_hint(self, text: str):
+        """借右下角比例指示器显示一句一次性说明，2 秒后自动退回比例"""
+        if self._source.isNull():
+            return
+        self.zoom_label.setText(text)
+        self.zoom_label.adjustSize()
+        self.zoom_label.show()
+        self._place_zoom_label()
+        self._hint_timer.start()
+
+    def _mouse_press(self, event) -> bool:
+        """按下鼠标 → 要不要开始拖？返回 True 表示这次按下归我们处理。"""
+        button = event.button()
+        if button == Qt.MiddleButton:
+            if not self._pan_available():
+                return False
+            self._begin_pan(event, pending=False)   # 中键拖动：不用按空格，随按随拖
+            return True
+        if button != Qt.LeftButton or not self._pan_available():
+            return False
+        # 空格+左键：意图明确，立刻开始拖
+        # 光是左键：先记下起点，走够 PAN_START_SLOP 才算拖（否则单击/双击会被带歪）
+        self._begin_pan(event, pending=not self._space_held)
+        return True
+
+    def _begin_pan(self, event, pending: bool):
+        self._pan_origin = event.globalPosition().toPoint()
+        self._pan_start_h = self.horizontalScrollBar().value()
+        self._pan_start_v = self.verticalScrollBar().value()
+        self._panning = not pending
+        self._pending_pan = pending
+        self._update_pan_cursor()
+
+    def _pan_step(self, event) -> bool:
+        """拖动中：按位移设滚动条。返回 True 表示这次移动被吃掉。"""
+        if not (self._panning or self._pending_pan):
+            return False
+        # 用全局坐标算位移，省得纠结事件是 label 还是 viewport 发的（坐标系不同）
+        delta = event.globalPosition().toPoint() - self._pan_origin
+        if self._pending_pan:
+            if max(abs(delta.x()), abs(delta.y())) < self.PAN_START_SLOP:
+                return True                   # 还在门槛内：当作点击，先不动画面
+            self._pending_pan = False
+            self._panning = True
+            self._update_pan_cursor()
+        self.horizontalScrollBar().setValue(self._pan_start_h - delta.x())
+        self.verticalScrollBar().setValue(self._pan_start_v - delta.y())
+        return True
 
     def eventFilter(self, obj, event):
         if not self._ready:
@@ -613,25 +703,20 @@ class ImageViewer(QScrollArea):
                 self._zoom_by(self.ZOOM_STEP if delta > 0 else 1 / self.ZOOM_STEP,
                               anchor=self._viewport_pos(event))
             return True                       # Ctrl+滚轮一律吃掉，别漏给外层滚动
-        if etype == QEvent.MouseButtonDblClick:
+        if etype == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
             self.toggle_fit()
             return True
-        if (etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton
-                and self._space_held):
-            self._panning = True
-            self._pan_origin = event.globalPosition().toPoint()
-            self._pan_start_h = self.horizontalScrollBar().value()
-            self._pan_start_v = self.verticalScrollBar().value()
-            self._update_pan_cursor()
-            return True
-        if etype == QEvent.MouseMove and self._panning:
-            # 用全局坐标算位移，省得纠结事件是 label 还是 viewport 发的（坐标系不同）
-            delta = event.globalPosition().toPoint() - self._pan_origin
-            self.horizontalScrollBar().setValue(self._pan_start_h - delta.x())
-            self.verticalScrollBar().setValue(self._pan_start_v - delta.y())
-            return True
-        if (etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
-                and self._panning):
+        if etype == QEvent.MouseButtonPress:
+            if self._mouse_press(event):
+                return True
+        elif etype == QEvent.MouseMove:
+            if self._pan_step(event):
+                return True
+        elif (etype == QEvent.MouseButtonRelease
+                and event.button() in (Qt.LeftButton, Qt.MiddleButton)
+                and (self._panning or self._pending_pan)):
+            # 松开一律认账。旧实现只在「正在拖」时结束拖动，万一松开事件落到别处
+            # （比如压在右下角指示器上），状态就卡在拖动中，光标一直握拳、之后再也拖不动。
             self._end_pan()
             return True
         return super().eventFilter(obj, event)
@@ -675,6 +760,7 @@ class ImageViewer(QScrollArea):
 
         self.preview_label.setPixmap(pixmap)
         self.preview_label.setFixedSize(pixmap.size())
+        self._update_pan_cursor()     # 「还能不能拖」随缩放变化，手形光标得跟着变
         self._update_zoom_label()
 
     def _update_zoom_label(self):
