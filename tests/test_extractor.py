@@ -55,6 +55,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from web_image_dl.extractor import (
     clean_url,
     extract_image_urls,
+    extract_title,
     is_wechat_url,
     to_compressed_url,
     to_original_url,
@@ -500,6 +501,64 @@ def test_cancel():
     eq(len(got2['cancelled']), 1, '已下载的 1 张仍然交付给界面')
 
 
+def test_extract_title():
+    """v1.7.0：文章标题提取。下载文件夹名要用它（日期_时分秒_标题）。
+
+    这条最容易「静默失效」：抓不到标题不会报错，只是文件夹名字退化成
+    「2026-09-18_164633_微信图片」，用户完全看不出是坏了。所以三种来源都钉。
+    """
+    print('\n[EXTRA] 文章标题提取')
+
+    # (a) og:title 最优先
+    eq(extract_title('<meta property="og:title" content="OG 标题">'), 'OG 标题', 'og:title 取到')
+    eq(extract_title('<meta content="反序标题" property="og:title">'), '反序标题',
+       'content 与 property 顺序反过来也能取')
+    eq(extract_title("<meta property='og:title' content='单引号标题'>"), '单引号标题',
+       '属性用单引号也能取')
+
+    # (b) 微信正文页的 JS 变量
+    eq(extract_title("var msg_title = '微信变量标题';"), '微信变量标题', 'msg_title 取到')
+    eq(extract_title('var msg_title = "双引号标题";'), '双引号标题', 'msg_title 用双引号也能取')
+    eq(extract_title(r"var msg_title = '带\'引号\'的标题';"), "带'引号'的标题",
+       r"值里的 \' 转义被还原")
+    eq(extract_title("var msg_title = '换行\n标题';"), '换行 标题', '标题里的换行压成空格')
+
+    # (c) <title> 兜底
+    eq(extract_title('<title>页面标题</title>'), '页面标题', 'title 兜底')
+    eq(extract_title('<title data-x="1">带属性</title>'), '带属性', 'title 带属性也能取')
+    eq(extract_title('<TITLE>大写标签</TITLE>'), '大写标签', '标签大小写不敏感')
+
+    # (d) 优先级
+    eq(extract_title('<meta property="og:title" content="优先"/>'
+                     "var msg_title = '次选';"
+                     '<title>再次</title>'), '优先', 'og:title 先于 msg_title')
+    eq(extract_title("var msg_title = '次选';<title>再次</title>"), '次选',
+       'msg_title 先于 title')
+    # og:title 为空时应该继续往下找，而不是直接返回空
+    eq(extract_title('<meta property="og:title" content=""/>'
+                     '<title>空了就往下找</title>'), '空了就往下找', 'og:title 为空时继续下一来源')
+
+    # (e) 转义还原
+    eq(extract_title('<meta property="og:title" content="A &amp; B">'), 'A & B',
+       'HTML 实体被还原')
+    eq(extract_title('<meta property="og:title" content="&amp;#39;双层&amp;#39;">'),
+       "'双层'", '多重实体也能还原（微信会二次转义）')
+    eq(extract_title('<meta property="og:title" content=" 两边有空格 ">'), '两边有空格',
+       '标题首尾空白去掉')
+
+    # (f) 取不到时返回空串（由 naming 兜底成「微信图片」），绝不能返回 None
+    eq(extract_title(''), '', '空 HTML → 空串')
+    eq(extract_title(None), '', 'None → 空串（不让调用方炸）')
+    eq(extract_title('<p>没有任何标题信息</p>'), '', '真的没有标题 → 空串')
+    eq(extract_title('<title></title>'), '', 'title 为空 → 空串')
+
+    # (g) worker 真的会把标题带出来（folder naming 依赖这个属性）
+    w = FetchWorker('<meta property="og:title" content="喂给 worker 的标题">', is_url=False)
+    eq(w.article_title, '', 'worker 初始标题是空串而不是 None')
+    w.run()          # 没有 mmbiz 图会走 error 分支，但标题应先写好了
+    eq(w.article_title, '喂给 worker 的标题', 'worker.run() 后带出标题')
+
+
 def main():
     test_url_rewrite()
     test_extract()
@@ -511,6 +570,7 @@ def main():
     test_save_write()
     test_save_worker()
     test_cancel()
+    test_extract_title()
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

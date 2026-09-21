@@ -12,6 +12,13 @@ import subprocess
 import sys
 import zipfile
 
+# 输出统一 UTF-8：管道/重定向下 Windows 默认走 GBK，print ⚠ ✗ 这类字符会直接
+# UnicodeEncodeError 崩掉（v1.8.0 打包时真实踩过 —— installer 里已有同版本产物
+# 时 version_gate 打 ⚠，当场炸在闸门上）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 

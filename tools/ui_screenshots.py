@@ -88,25 +88,64 @@ def build_article_infos():
 
 
 def fake_history_rows():
-    """伪造历史行（只在内存里，绝不碰用户的 history.db）"""
+    """伪造历史行（只在内存里，绝不碰用户的 history.db）
+
+    路径按 v1.7.0 的新形态写：各条都指向「图库／日期_时分秒_标题」这样的批次子文件夹。
+    其中一条指向**真实存在的临时目录**（「打开」可用），一条指向一个确定不存在的目录
+    （应被标成「本地已删除」并把按钮置灰）—— 一次截图就同时看到两种状态。
+    """
     from datetime import datetime, timedelta
     from web_image_dl.history_manager import HistoryEntry
     now = datetime.now()
+    alive = os.path.join(tempfile.mkdtemp(prefix='imgsnag_shot_lib_'),
+                         '2026-09-18_164633_秋天的第一杯奶茶')
+    os.makedirs(alive, exist_ok=True)
+    gone = os.path.join(tempfile.gettempdir(), '__imgsnag_shot_gone__',
+                        '2026-09-17_213015_城市黄昏随拍')
     rows = [
-        ("https://mp.weixin.qq.com/s/EoKPKXS7ec89I5cdBrRgQQ", 8, 8, "done", 0),
-        ("https://mp.weixin.qq.com/s/dpH_jGk1MogIzRBkgx1Qtw", 5, 6, "done", 1),
-        ("https://mp.weixin.qq.com/s/ThisIsAVeryLongArticleUrlForTestingTruncation123456", 42, 42, "scanned", 2),
-        ("https://mp.weixin.qq.com/s/FailedFetchExampleAbcDef", 0, 3, "failed", 3),
+        ("https://mp.weixin.qq.com/s/EoKPKXS7ec89I5cdBrRgQQ", 8, 8, "done", 0, alive),
+        ("https://mp.weixin.qq.com/s/dpH_jGk1MogIzRBkgx1Qtw", 5, 6, "done", 1, gone),
+        ("https://mp.weixin.qq.com/s/ThisIsAVeryLongArticleUrlForTestingTruncation123456",
+         42, 42, "scanned", 2, ''),
+        ("https://mp.weixin.qq.com/s/FailedFetchExampleAbcDef", 0, 3, "failed", 3, ''),
     ]
     out = []
-    for url, ok, total, status, back in rows:
+    for url, ok, total, status, back, path in rows:
         out.append(HistoryEntry(
             id=100 + back, source_url=url, total_images=total, success_images=ok,
-            save_path=r'D:\图片\公众号' if status == 'done' else '',
-            status=status,
+            save_path=path, status=status,
             parsed_at=(now - timedelta(hours=back * 26)).isoformat(timespec='seconds'),
         ))
     return out
+
+
+def snap_dialog(title, path, note='', tries=25, delay=60):
+    """在对话框自己的事件循环里把它截下来再关掉。
+
+    QDialog.exec() 是阻塞的，截图必须排在它的事件循环里做。找不到就重试，
+    重试完仍找不到时把可见对话框一律关掉 —— 否则 exec 不返回，脚本会卡死。
+    """
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+
+    def _tick(n=0):
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, QDialog) and w.isVisible() and w.windowTitle() == title:
+                # 刚 show 出来的那一瞬尺寸还没定（QMessageBox 尤其明显，会抓成一条窄带），
+                # 先按内容算好尺寸再截
+                w.adjustSize()
+                QApplication.processEvents()
+                shot(w, path, note)
+                w.reject()
+                return
+        if n < tries:
+            QTimer.singleShot(delay, lambda: _tick(n + 1))
+            return
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, QDialog) and w.isVisible():
+                w.reject()
+
+    QTimer.singleShot(delay, _tick)
 
 
 def main():
@@ -184,6 +223,65 @@ def main():
     QApplication.processEvents()
     win.preview.zoom_100()
     shot(win, os.path.join(outdir, '07_预览缩放到100%.png'), '右下角显示比例')
+
+    # ---- 8. 关于对话框（v1.6.0 新增：侧边栏底部的版本号可点） ----
+    snap_dialog('关于 ImgSnag', os.path.join(outdir, '08_关于.png'), '版本号入口')
+    win._show_about()
+
+    # ---- 9. 发现新版本：侧边栏提示 + 更新对话框（伪造检查结果，不联网） ----
+    from web_image_dl import updater as U
+
+    cur = win.version_label.text().lstrip('v') or '1.7.0'
+    # 演示用的是「比当前高一个次版本」，这样发版后截图不会显得自相矛盾
+    parts = (cur.split('.') + ['0', '0'])[:3]
+    demo_latest = f'{parts[0]}.{int(parts[1]) + 1}.0'
+    win._last_update_info = U.UpdateInfo(
+        ok=True, current=cur, latest=demo_latest, tag=f'v{demo_latest}', has_update=True,
+        notes=(f'## v{demo_latest}（示例）\n'
+               '- 这一屏是「发现新版本」的样子，内容由「检查更新」从 GitHub 拉取\n'
+               '- 静默检查发现新版只在侧边栏亮提示，不弹窗打扰\n'
+               '- 想看更新内容时点侧边栏提示或「关于」里的检查更新\n'),
+        page_url='https://github.com/virmuran/ImgSnag-WeChat/releases/latest',
+        assets=[
+            U.AssetInfo(f'ImgSnagWeChat_{demo_latest}_setup.exe', 'installer', 30_500_000,
+                        'https://example.com/a.exe', demo_latest),
+            U.AssetInfo(f'ImgSnagWeChat_{demo_latest}_portable.zip', 'portable', 31_800_000,
+                        'https://example.com/b.zip', demo_latest),
+        ],
+    )
+    win._show_update_hint(demo_latest)
+    shot(win, os.path.join(outdir, '09_侧边栏提示有新版.png'), f'侧边栏 ⬆ v{demo_latest}')
+    snap_dialog('发现新版本', os.path.join(outdir, '10_发现新版本.png'), '更新对话框')
+    win._show_update_dialog()
+    win._clear_update_hint()
+
+    # ---- 11. 下载完成：告诉用户图存进了哪个专属文件夹（v1.7.0） ----
+    demo_folder = os.path.join(
+        'C:\\Users\\Administrator\\Pictures\\ImgSnagWeChat',
+        '2026-09-18_164633_秋天的第一杯奶茶')
+    snap_dialog('下载完成', os.path.join(outdir, '11_下载完成_存进专属文件夹.png'),
+                '自动建的批次文件夹，不再让用户自己挑目录')
+    win._on_save_done(8, 0, [], demo_folder)
+
+    # ---- 12. 历史批次在软件里打开（v1.8.0：只读浏览） ----
+    from web_image_dl.history_manager import HistoryEntry
+
+    batch_dir = os.path.join(tempfile.mkdtemp(prefix='imgsnag_shot_browse_'),
+                             '2026-09-18_164633_秋天的第一杯奶茶')
+    os.makedirs(batch_dir, exist_ok=True)
+    for idx, w, h, hue in ARTICLE[:5]:
+        with open(os.path.join(batch_dir, f'img_{idx:02d}.png'), 'wb') as f:
+            f.write(fake_photo(w, h, hue, f'IMG {idx}'))
+    browse_entry = HistoryEntry(
+        id=9901, source_url='https://mp.weixin.qq.com/s/EoKPKXS7ec89I5cdBrRgQQ',
+        total_images=5, success_images=5, save_path=batch_dir, status='done',
+        parsed_at='2026-09-18T16:46:33',
+    )
+    win.resize(1500, 950)
+    win._on_browse_batch(browse_entry)
+    QApplication.processEvents()
+    shot(win, os.path.join(outdir, '12_历史批次在软件里打开.png'),
+         '只读浏览：图从磁盘读回来，下载按钮禁用并说明原因')
 
     win.close()
     print('完成')

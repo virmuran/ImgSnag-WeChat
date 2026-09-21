@@ -3,10 +3,25 @@
 只保留微信策略：mmbiz.qpic.cn 图片识别、CDN 变体合并、水印版剔除、原图画质提升
 """
 import re
+from html import unescape as _html_unescape
 from urllib.parse import urlparse
 
 
 WECHAT_HOST = 'mp.weixin.qq.com'
+
+#: 标题来源，按可靠性排序：(正则, 取值分组序号)
+#: 注意本模块多处用 `html` 作参数名，所以 html 模块必须带别名导入，否则被参数遮住。
+_TITLE_SOURCES = (
+    # <meta property="og:title" content="...">（属性顺序不固定，两个方向都试）
+    (re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]*?content=["\'](.*?)["\']',
+                re.I | re.S), 1),
+    (re.compile(r'<meta[^>]+content=["\'](.*?)["\'][^>]*?property=["\']og:title["\']',
+                re.I | re.S), 1),
+    # var msg_title = '...'（微信正文页的 JS 变量，最接近真实标题；值里可能有转义引号）
+    (re.compile(r"""msg_title\s*=\s*(['"])((?:\\.|(?!\1).)*)\1""", re.S), 2),
+    # 最后兜底 <title>
+    (re.compile(r'<title[^>]*>(.*?)</title>', re.I | re.S), 1),
+)
 
 #: mmbiz 图片地址骨架：CDN 前缀 + 图片 ID（第一个路径段即身份），尺寸段与查询串都属可变部分
 _MMBIZ_RE = re.compile(
@@ -100,6 +115,41 @@ def clean_url(url: str) -> str:
     u = u.replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
     u = u.split('#', 1)[0]          # 去掉 #imgIndex=4 这类锚点
     return u.strip()
+
+
+def _decode_title_text(raw: str) -> str:
+    """把标题里的转义还原成正常文字。
+
+    微信会先做 HTML 实体转义、再塞进 JS 字符串，于是出现 `\\x26amp;#39;` 这种
+    多重转义；只解一层是不够的，所以先还原 `\\xNN` 与 JS 反斜杠转义，再解两轮实体。
+    """
+    if not raw:
+        return ''
+    s = raw
+    for esc, ch in (('\\x26', '&'), ('\\x3d', '='), ('\\x3c', '<'), ('\\x3e', '>'),
+                    ('\\/', '/'), ("\\'", "'"), ('\\"', '"')):
+        s = s.replace(esc, ch)
+    s = _html_unescape(_html_unescape(s))
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def extract_title(html) -> str:
+    """从文章 HTML 里取标题，给下载文件夹命名用。
+
+    依次尝试 og:title → `var msg_title` → `<title>`，取到第一个非空即返回；
+    都取不到返回空串（由 naming.FALLBACK_TITLE 兜底成「微信图片」）。
+
+    这里**不做文件名清洗** —— 非法字符、长度、保留名都是 naming.sanitize_title 的事，
+    两处各洗一遍迟早对不上。
+    """
+    if not html:
+        return ''
+    for pat, group in _TITLE_SOURCES:
+        for m in pat.finditer(html):
+            text = _decode_title_text(m.group(group))
+            if text:
+                return text
+    return ''
 
 
 def _wechat_image_key(url):

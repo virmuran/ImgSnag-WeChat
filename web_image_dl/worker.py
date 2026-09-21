@@ -13,7 +13,7 @@ import requests
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-from .extractor import extract_image_urls, to_compressed_url
+from .extractor import extract_image_urls, to_compressed_url, extract_title
 from .blocked_config import blocked_config, classify
 
 
@@ -43,6 +43,9 @@ class ImageInfo:
     block_reasons: tuple = ()
     original_url: str = ""       # 原图地址（/0）
     fallback_url: str = ""       # 压缩版地址（/640）
+    #: 显示用的真实文件名（历史浏览来自磁盘）。空则界面按序号拼 img_XX.ext ——
+    #: 浏览旧图库时用户可能删过或改过名字，按序号显示会张冠李戴
+    name_hint: str = ""
     used_original: bool = True   # 实际下载的是否为原图
 
     def classify_reasons(self, blocked_sets=None) -> tuple:
@@ -65,6 +68,10 @@ class FetchWorker(QThread):
         self.include_script_sources = include_script_sources
         self.prefer_original = prefer_original
         self._cancelled = False
+        #: 文章标题（解析时从 HTML 取出），给下载文件夹命名用。
+        #: 不用信号回传是为了不改 all_done 的签名（改了会连带改动别处）；
+        #: 界面在 all_done 之后才读，那时 run() 早已写完，不存在竞态。
+        self.article_title = ""
 
     def cancel(self):
         """请求取消。最坏情况要等当前这张图的请求超时（20s）后才会退出循环。"""
@@ -102,6 +109,9 @@ class FetchWorker(QThread):
                 html = resp.text
             else:
                 html = self.source
+
+            # 标题先取出来：后面无论从哪条路径返回，界面都能拿到它给文件夹命名
+            self.article_title = extract_title(html)
 
             urls = []
             if not self._cancelled:

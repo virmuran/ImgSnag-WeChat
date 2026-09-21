@@ -26,7 +26,10 @@ K_SORT_INDEX = "ui/sort_index"          # 排序方式下拉框的序号
 K_FILTER_SMALL = "ui/filter_small"      # 「过滤小图与装饰」开关
 K_PREFER_ORIGINAL = "quality/prefer_original"   # 「原图画质」开关
 K_FORMAT = "io/format"                  # 保存格式（原格式 / JPG / PNG / WebP）
-K_LAST_SAVE_DIR = "io/last_save_dir"    # 上次保存到哪个目录
+K_LAST_SAVE_DIR = "io/last_save_dir"    # 上次保存到哪个目录（现在只给「另存到…」当起始位置）
+K_LIBRARY_DIR = "io/library_dir"        # 图库根目录；空 = 用系统「图片」下的 ImgSnagWeChat
+K_AUTO_CHECK_UPDATE = "update/auto_check"    # 启动后是否自动检查新版本
+K_LAST_UPDATE_CHECK = "update/last_check"    # 上次检查更新的时间戳（做 6 小时节流）
 
 #: 类型由默认值决定：bool / int / str
 DEFAULTS = {
@@ -35,6 +38,9 @@ DEFAULTS = {
     K_PREFER_ORIGINAL: True,
     K_FORMAT: "原格式",
     K_LAST_SAVE_DIR: "",
+    K_LIBRARY_DIR: "",
+    K_AUTO_CHECK_UPDATE: True,
+    K_LAST_UPDATE_CHECK: 0,
 }
 
 

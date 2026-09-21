@@ -124,8 +124,8 @@ class ThumbnailItem(QFrame):
         )
         self.badge.hide()
 
-        # 勾选框（文件名）
-        name = f"img_{info.index + 1:02d}{info.ext}"
+        # 勾选框（文件名）：历史浏览时用磁盘上的真实文件名，其余按序号拼
+        name = getattr(info, 'name_hint', '') or f"img_{info.index + 1:02d}{info.ext}"
         self.checkbox = QCheckBox(name)
         self.checkbox.setChecked(not info.is_duplicate)
         self.checkbox.setStyleSheet("font-size: 11px;")

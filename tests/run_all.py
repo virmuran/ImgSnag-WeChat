@@ -27,6 +27,9 @@ REPORT = os.path.join(HERE, '_last_run.txt')
 DEFAULT_FILES = [
     'test_extractor.py',       # 提取/画质/保存链路（纯逻辑）
     'test_filter_rules.py',    # 屏蔽尺寸与过滤规则（纯逻辑）
+    'test_naming.py',          # 图库文件夹命名与清洗（纯逻辑）
+    'test_library.py',         # 历史批次文件夹扫描与排序（纯逻辑）
+    'test_updater.py',         # 版本检测与检查更新（纯逻辑，不联网）
     'test_ui_smoke.py',        # 界面回归（离屏）
 ]
 
