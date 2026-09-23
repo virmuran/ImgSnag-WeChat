@@ -1867,6 +1867,77 @@ def test_browse_history_batch(app):
             QMessageBox.information, QMessageBox.warning = orig_info, orig_warn
 
 
+def test_reparse_keeps_download(app):
+    """v1.8.1（UI-27）：已下载的链接重新解析后，下载记录不许消失。
+
+    用户的真实遭遇：下载过的链接再解析一次，历史里那条就变成「已解析、
+    没下载」—— history_manager.add 先删后插把 done 行连 save_path 一起删了。
+    这里用真实的 HistoryManager（临时 db）走一遍窗口里的解析完成回调。
+    """
+    import web_image_dl.app as app_mod
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    from web_image_dl.app import ImageDownloaderApp
+    from web_image_dl.history_manager import HistoryManager
+
+    print('\n[UI-27] 重新解析已下载的链接，下载记录还在、还能打开')
+
+    tmp = tempfile.mkdtemp(prefix='imgsnag_reparse_')
+    folder = os.path.join(tmp, '2026-09-21_120000_已下载过的文章')
+    os.makedirs(folder)
+    with open(os.path.join(folder, 'img_01.png'), 'wb') as f:
+        f.write(png_bytes(40, 40))
+
+    hm = HistoryManager(db_path=os.path.join(tmp, 'history.db'))
+    url = 'https://mp.weixin.qq.com/s/ReparseMe'
+    hid = hm.add(url, total_images=1, success_images=1, save_path=folder, status='done')
+
+    with _isolated_config():
+        win = ImageDownloaderApp()
+        win.show()
+        QApplication.processEvents()
+        real_hm = app_mod.history_manager
+        orig_warn = QMessageBox.warning
+        QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
+        app_mod.history_manager = hm
+        try:
+            # 模拟「重新解析同一链接」走到解析完成落账这一步
+            win._last_parsed_url = url
+            win._on_all_done([])
+
+            rows = hm.get_all()
+            eq(len(rows), 1, '还是只有一行（不会冒出一条「已解析、0 下载」）')
+            eq(rows[0].id, hid, '复用同一行，后续下载回调还能找到它')
+            eq(rows[0].status, 'done', '状态仍是「已下载」')
+            eq(rows[0].save_path, folder, '保存路径还在')
+
+            # 历史页刷新后，这一行必须还能「查看 / 打开」
+            win._refresh_history()
+            QApplication.processEvents()
+            t = win.history_table
+            eq(t.rowCount(), 1, '历史页渲染一行')
+            eq(t.item(0, 4).text(), '已下载', f'状态列显示已下载（实测 {t.item(0, 4).text()!r}）')
+            btns = [b.text() for w in (t.cellWidget(0, 5),) if w
+                    for b in w.findChildren(QPushButton)]
+            check('查看' in btns, f'「查看」按钮在（实测 {btns!r}）')
+            view_btn = next(b for b in t.cellWidget(0, 5).findChildren(QPushButton)
+                            if b.text() == '查看')
+            check(view_btn.isEnabled(), '文件夹在磁盘上 →「查看」可用（这正是本次修复的意义）')
+
+            # 解析失败路径同样不许毁掉下载记录
+            win._last_parsed_url = url
+            win._on_error('模拟：文章已被删除')
+            rows = hm.get_all()
+            eq(len(rows), 1, '失败后仍是一行')
+            eq(rows[0].status, 'done', '解析失败不改「已下载」状态')
+            eq(rows[0].save_path, folder, '失败后路径还在')
+        finally:
+            app_mod.history_manager = real_hm
+            QMessageBox.warning = orig_warn
+        win.close()
+        QApplication.processEvents()
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     test_preview_scale(app)
@@ -1892,6 +1963,7 @@ def main():
     test_history_missing_marker(app)
     test_reparse_and_action_row(app)
     test_browse_history_batch(app)
+    test_reparse_keeps_download(app)
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

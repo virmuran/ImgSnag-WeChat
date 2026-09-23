@@ -20,6 +20,13 @@ import subprocess
 import sys
 import time
 
+# 输出里有 ✗/✅ 这类符号，而 Windows 下被别的工具转手调起时 stdout 常是 GBK
+# 管道 —— 不强制 UTF-8 会在 print 报告时直接 UnicodeEncodeError 崩掉，
+# 连 _last_run.txt 都来不及写（v1.8.1 踩过：表现为闸门 rc=1 但报告是上一轮的旧内容）
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 REPORT = os.path.join(HERE, '_last_run.txt')
@@ -30,6 +37,7 @@ DEFAULT_FILES = [
     'test_naming.py',          # 图库文件夹命名与清洗（纯逻辑）
     'test_library.py',         # 历史批次文件夹扫描与排序（纯逻辑）
     'test_updater.py',         # 版本检测与检查更新（纯逻辑，不联网）
+    'test_history.py',         # 下载历史：重新解析不抹掉下载记录（纯逻辑，临时 db）
     'test_ui_smoke.py',        # 界面回归（离屏）
 ]
 

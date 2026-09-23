@@ -10,7 +10,9 @@
 更新通道静默失效且不报任何错。所以这里把 tag、资产名、两者是否一致一并记进
 UpdateInfo，界面上直接点出来。
 
-网络：走 requests（项目已有依赖，证书用 certifi，不额外引入东西）。
+网络：走 requests（项目已有依赖），但**证书不能只用 certifi** —— 见下面
+`system_ca_bundle()` 的长注释：公司网络与加速器转发流量时用的是自己装的根证书，
+它只装在 Windows 证书存储里，requests 只认 certifi 就会 `CERTIFICATE_VERIFY_FAILED`。
 未认证请求按 IP 限流 60 次/小时，所以界面侧默认 6 小时才查一次。
 
 测试：`check_for_updates(fetch=...)` 的 fetch 可注入，整个模块不需要联网就能测。
@@ -18,7 +20,10 @@ UpdateInfo，界面上直接点出来。
 
 from __future__ import annotations
 
+import os
 import re
+import ssl
+import time
 from dataclasses import dataclass, field
 
 try:
@@ -64,6 +69,78 @@ ASSET_KIND_LABELS = {"installer": "安装包", "portable": "便携包", "file": 
 
 #: 判断 .exe 是不是安装包（Inno Setup 产物形如 ImgSnagWeChat_1.6.0_setup.exe）
 INSTALLER_HINTS = ("setup", "install", "installer")
+
+#: 合并后的 CA 包落盘位置（与下载历史数据库同目录）
+CA_BUNDLE_PATH = os.path.join(os.path.expanduser("~/.imgsnag_wechat"), "ca_bundle.pem")
+
+#: CA 包多久重建一次。证书存储会变（装/卸加速器、公司推新根证书），
+#: 不做失效就会一直用一份过期的包；每次都重建又太浪费（要读几十张证书）
+CA_BUNDLE_MAX_AGE = 7 * 24 * 3600
+
+
+# ------------------------------------------------------------------ 网络
+
+def system_ca_bundle(path: str | None = None,
+                     max_age: float = CA_BUNDLE_MAX_AGE) -> str | None:
+    """把 Windows 证书存储里的根证书合并进 certifi 的 CA 包，返回可供 requests 当
+    ``verify=`` 用的 PEM 路径；拿不到就返回 None（交给 requests 默认行为）。
+
+    **为什么必须这么做**（v1.8.2 用户实测）：
+    requests 只信任 certifi 自带的 CA 列表，而**公司网络 / 加速器在做 TLS 转发时用的是
+    自己装的根证书** —— 本机实测对端证书由「SteamTools Certificate」签发，这张根证书
+    装在 Windows 证书存储里，于是：
+      · urllib（走系统存储）→ 验证通过，能正常拉到 Release（ChemCal 用的就是它）
+      · requests（只用 certifi）→ CERTIFICATE_VERIFY_FAILED，界面弹出「无法连接 GitHub」
+    合并包 = certifi + 系统 ROOT/CA 的**超集**，对没被转发的站点毫无影响，
+    同时让「公司网络里装过根证书」这种正常场景不再误报成网络故障。
+
+    任何异常都返回 None —— 检查更新是锦上添花，绝不能因此抛异常或崩界面。
+    """
+    target = path or CA_BUNDLE_PATH
+    try:
+        st = os.stat(target)
+        if st.st_size > 0 and (time.time() - st.st_mtime) < max_age:
+            return target                       # 缓存还新鲜，直接用
+    except OSError:
+        pass
+
+    try:
+        parts = []
+        try:
+            import certifi
+            with open(certifi.where(), encoding="utf-8") as f:
+                parts.append(f.read())
+        except Exception:                        # pragma: no cover - certifi 必在
+            pass
+
+        added = 0
+        enum = getattr(ssl, "enum_certificates", None)   # 只有 Windows 有
+        if enum is not None:
+            for store in ("ROOT", "CA"):
+                try:
+                    certs = enum(store) or []
+                except Exception:
+                    continue
+                for cert, enc, _trust in certs:
+                    if enc != "x509_asn":
+                        continue
+                    try:
+                        parts.append(ssl.DER_cert_to_PEM_cert(cert))
+                        added += 1
+                    except Exception:
+                        continue
+        if not parts or added == 0:
+            # 非 Windows，或一张系统证书都读不到：别拿半个包去顶替 certifi
+            return None
+
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        tmp = target + ".tmp"
+        with open(tmp, "w", encoding="ascii") as f:
+            f.write("\n".join(parts))
+        os.replace(tmp, target)                  # 原子替换，避免半截 PEM 被读到
+        return target
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------ 数据结构
@@ -158,18 +235,28 @@ def human_size(n) -> str:
 
 # ------------------------------------------------------------------ 网络
 
-def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT) -> dict:
-    """请求 GitHub「最新正式发布」接口。失败时抛异常，由 check_for_updates 归类。"""
+def fetch_latest_release(url: str = API_URL, timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """请求 GitHub「最新正式发布」接口。失败时抛异常，由 check_for_updates 归类。
+
+    签名必须与 check_for_updates 的注入契约 ``fetch(url, timeout)`` 一致 ——
+    v1.8.0 及以前只收 ``timeout``，而调用方按两参传，测试又全用注入的假 fetch，
+    真联网这条路从没被走到：用户点「检查更新」就报
+    ``takes from 0 to 1 positional arguments but 2 were given``。
+    """
     if requests is None:                      # pragma: no cover
         raise RuntimeError("缺少 requests 依赖，无法联网检查更新")
-    resp = requests.get(
-        API_URL,
-        timeout=timeout,
-        headers={
+    kwargs = {
+        "timeout": timeout,
+        "headers": {
             "Accept": "application/vnd.github+json",
             "User-Agent": f"ImgSnag-WeChat/{LOCAL_VERSION or 'dev'}",
         },
-    )
+    }
+    # 用「certifi + 系统证书存储」的合并包。拿不到就不传，退回 requests 默认（certifi）
+    bundle = system_ca_bundle()
+    if bundle:
+        kwargs["verify"] = bundle
+    resp = requests.get(url, **kwargs)
     resp.raise_for_status()
     return resp.json()
 
@@ -186,7 +273,14 @@ def _describe_error(exc: Exception) -> str:
         return f"GitHub 返回 HTTP {status}，请稍后再试"
 
     name = type(exc).__name__
-    if "Timeout" in name or "timeout" in str(exc).lower():
+    # 证书验证失败要单独说 —— 它听起来像「网络不通」，实际是这条链路在做 TLS 转发
+    # （公司网络、加速器），用户该做的动作完全不同（关掉加速器 / 找 IT 要根证书）
+    text = str(exc)
+    if "CERTIFICATE_VERIFY_FAILED" in text or "certificate verify failed" in text.lower():
+        return ("HTTPS 证书验证失败：这条网络链路在用自签名证书转发流量"
+                "（公司网络或加速器常见）。程序已自动改用系统证书存储仍没通过，"
+                "试试关掉加速器/代理再检查")
+    if "Timeout" in name or "timeout" in text.lower():
         return ("连接 GitHub 超时。国内网络常见，公司网络可能直接限制访问 —— "
                 "不影响本程序其他功能")
     if "Connection" in name or "SSL" in name or "SSLError" in name:

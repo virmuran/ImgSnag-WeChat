@@ -23,6 +23,7 @@
 import os
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -294,6 +295,174 @@ def test_settings_keys():
     s.use_default_store()
 
 
+def test_real_fetch_path():
+    """v1.8.1 修复回归：真实的 fetch_latest_release 必须接得住 (url, timeout) 两参调用。
+
+    之前的测试全用注入的假 fetch（按两参写），真联网的默认 getter 只收一个
+    timeout —— 用户一点「检查更新」就报
+    ``takes from 0 to 1 positional arguments but 2 were given``，
+    而测试全绿。这里 mock 掉 requests 层，走**真实的** fetch_latest_release。
+    """
+    print('\n[UP-7] 默认 getter（fetch_latest_release）按注入契约 (url, timeout) 调用')
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return _release('v9.9.9')
+
+    seen = {}
+
+    class _FakeRequests:
+        def get(self, url, timeout=None, headers=None, verify=None):
+            seen['url'] = url
+            seen['timeout'] = timeout
+            seen['headers'] = headers
+            seen['verify'] = verify
+            return _Resp()
+
+    orig = U.requests
+    # 千万别真往 ~/.imgsnag_wechat/ca_bundle.pem 写东西：把包指到临时目录
+    ca_dir = tempfile.mkdtemp(prefix='imgsnag_ca_')
+    orig_ca = U.CA_BUNDLE_PATH
+    U.CA_BUNDLE_PATH = os.path.join(ca_dir, 'ca_bundle.pem')
+    U.requests = _FakeRequests()
+    try:
+        expected_bundle = U.system_ca_bundle()
+
+        # 直接调：两个位置参数都要接得住
+        data = U.fetch_latest_release(U.API_URL, 5.0)
+        eq(data['tag_name'], 'v9.9.9', 'fetch_latest_release(url, timeout) 返回接口数据')
+        eq(seen['url'], U.API_URL, '请求打到了配置的 API 地址')
+        eq(seen['timeout'], 5.0, 'timeout 原样传给 requests')
+        eq(seen['verify'], expected_bundle,
+           'verify= 用的是「certifi + 系统证书存储」合并包（公司网络/加速器转发时靠它）')
+
+        # 端到端：check_for_updates 不注入 fetch，走默认 getter
+        info = U.check_for_updates(current='1.0.0')
+        check(info.ok, f'check_for_updates 用默认 getter 不再报参数错误（实测 error={info.error!r}）')
+        eq(info.latest, '9.9.9', '端到端拿到最新版本号')
+        check(info.has_update, '1.0.0 < 9.9.9 判定有更新')
+        check(seen['headers'] is not None and 'User-Agent' in (seen['headers'] or {}),
+              '带 User-Agent 请求 GitHub（他们的接口要求）')
+
+        # 合并包不可用（非 Windows / 读不到证书）时不许传半个包：退回 requests 默认
+        seen.pop('verify', None)
+        with mock.patch.object(U, 'system_ca_bundle', lambda *a, **k: None):
+            U.fetch_latest_release(U.API_URL, 5.0)
+        eq(seen.get('verify'), None, '拿不到合并包时不传 verify（交给 requests 默认 certifi）')
+    finally:
+        U.requests = orig
+        U.CA_BUNDLE_PATH = orig_ca
+
+
+def _fake_enum(certs_by_store):
+    """造一个 ssl.enum_certificates 替身：{store: [der 字节…]}"""
+    def _enum(store):
+        return [(der, 'x509_asn', True) for der in certs_by_store.get(store, [])]
+    return _enum
+
+
+#: 随便一段字节即可 —— DER_cert_to_PEM_cert 只做 base64 包装，不解析内容
+_DER_A = b'\x30\x03\x02\x01\x01'
+_DER_B = b'\x30\x03\x02\x01\x02'
+
+
+def test_ca_bundle():
+    """v1.8.2（UP-8）：合并 CA 包的构建、缓存、以及与 certifi 的兼容性。
+
+    背景：requests 只认 certifi，而公司网络/加速器转发流量用的是装在 Windows
+    证书存储里的自签名根证书 —— 不合并就会把「证书没被信任」误报成「网络不通」。
+    """
+    print('\n[UP-8] 合并 CA 包：certifi + Windows 证书存储')
+
+    target = os.path.join(tempfile.mkdtemp(prefix='imgsnag_ca8_'), 'ca_bundle.pem')
+    enum = _fake_enum({'ROOT': [_DER_A, _DER_B], 'CA': [_DER_A]})
+
+    with mock.patch.object(U.ssl, 'enum_certificates', enum, create=True):
+        got = U.system_ca_bundle(target)
+        eq(got, target, '构建成功返回包路径')
+        check(os.path.isfile(target), '包文件真的写出来了')
+        text = open(target, encoding='ascii').read()
+        check('BEGIN CERTIFICATE' in text, '内容是 PEM 证书')
+        check(U.ssl.DER_cert_to_PEM_cert(_DER_A).strip() in text,
+              '系统证书存储里的证书被合并进来（这才是能救回加速器网络的那部分）')
+        try:
+            import certifi
+            certifi_text = open(certifi.where(), encoding='utf-8', errors='replace').read()
+            n_certifi = certifi_text.count('BEGIN CERTIFICATE')
+            n_merged = text.count('BEGIN CERTIFICATE')
+            eq(n_merged, n_certifi + 3,
+               '合并包 = certifi 的全部证书 + 系统存储那 3 张（超集，正常站点不受影响）')
+        except ImportError:      # pragma: no cover
+            pass
+
+        # 缓存：文件还新鲜时不再枚举（把枚举换成炸弹来证明没被调用）
+        mtime = os.stat(target).st_mtime
+
+        def _boom(store):
+            raise AssertionError('不该重建：缓存应当是新鲜的')
+
+        with mock.patch.object(U.ssl, 'enum_certificates', _boom, create=True):
+            eq(U.system_ca_bundle(target), target, '缓存新鲜 → 直接复用')
+        eq(os.stat(target).st_mtime, mtime, '复用时没有重写文件')
+
+        # 过期 → 重建（内容里的证书条数应当跟着枚举结果走）
+        os.utime(target, (mtime - U.CA_BUNDLE_MAX_AGE - 60,) * 2)
+        with mock.patch.object(U.ssl, 'enum_certificates',
+                               _fake_enum({'ROOT': [_DER_B], 'CA': []}), create=True):
+            U.system_ca_bundle(target)
+        text2 = open(target, encoding='ascii').read()
+        check(U.ssl.DER_cert_to_PEM_cert(_DER_B).strip() in text2, '过期后重建，内容跟着更新')
+
+    # 枚举失败 → None（不许抛，也不许留半个包）
+    target2 = os.path.join(tempfile.mkdtemp(prefix='imgsnag_ca8b_'), 'ca_bundle.pem')
+
+    def _raise(store):
+        raise OSError('证书存储读不了')
+
+    with mock.patch.object(U.ssl, 'enum_certificates', _raise, create=True):
+        eq(U.system_ca_bundle(target2), None, '枚举抛异常 → 返回 None（检查更新不该因此崩）')
+    check(not os.path.exists(target2), '失败时不留半截包')
+
+    # 一张都读不到 → None（等价于非 Windows：没有 enum_certificates）
+    with mock.patch.object(U.ssl, 'enum_certificates', _fake_enum({}), create=True):
+        eq(U.system_ca_bundle(target2), None, '读不到任何系统证书 → None')
+
+    target3 = os.path.join(tempfile.mkdtemp(prefix='imgsnag_ca8c_'), 'ca_bundle.pem')
+    with mock.patch.object(U.ssl, 'enum_certificates', None, create=True):
+        eq(U.system_ca_bundle(target3), None, '非 Windows（无 enum_certificates）→ None，退回 certifi')
+
+    # 目录不存在时要自己建出来（用户从没运行过下载时 ~/.imgsnag_wechat 可能还没建）
+    nested = os.path.join(tempfile.mkdtemp(prefix='imgsnag_ca8d_'), 'nope', 'deep', 'ca.pem')
+    with mock.patch.object(U.ssl, 'enum_certificates', _fake_enum({'ROOT': [_DER_A]}), create=True):
+        eq(U.system_ca_bundle(nested), nested, '目标目录不存在时自动创建')
+    check(os.path.isfile(nested), '嵌套路径也能写成功')
+
+    # 默认位置落在程序自己的数据目录里
+    check(os.path.basename(U.CA_BUNDLE_PATH) == 'ca_bundle.pem', '默认包名固定')
+    check('.imgsnag_wechat' in U.CA_BUNDLE_PATH, '默认落在 ~/.imgsnag_wechat（与历史数据库同处）')
+
+
+def test_cert_error_message():
+    """v1.8.2（UP-9）：证书验证失败不能报成「网络不通」——两者该做的动作完全不同。"""
+    print('\n[UP-9] 证书验证失败给专门的人话提示')
+    exc = requests.exceptions.SSLError(
+        "HTTPSConnectionPool(host='api.github.com', port=443): Max retries exceeded "
+        "(Caused by SSLError(SSLCertVerificationError(1, "
+        "'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "unable to get local issuer certificate (_ssl.c:1032)')))")
+    msg = U._describe_error(exc)
+    check('证书' in msg, f'提示里点明是证书问题（实测 {msg!r}）')
+    check('加速器' in msg or '代理' in msg, '给出可操作的方向（关掉加速器/代理）')
+
+    # 真联网时的兜底：check_for_updates 把证书错误也收进 error，不抛异常
+    info = U.check_for_updates(fetch=lambda url, timeout: (_ for _ in ()).throw(exc))
+    eq(info.ok, False, '证书失败 → ok=False')
+    check('证书' in info.error, 'error 文案与 _describe_error 一致')
+
+
 def main():
     test_tag_and_compare()
     test_assets()
@@ -301,6 +470,9 @@ def main():
     test_diagnostics()
     test_describe_error()
     test_settings_keys()
+    test_real_fetch_path()
+    test_ca_bundle()
+    test_cert_error_message()
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

@@ -13,7 +13,7 @@
     <img alt="deps" src="https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-requests%20%2B%20PySide6-Essentials-blue">
 </div>
 <div>
-    <img alt="version" src="https://img.shields.io/badge/version-1.8.0-green">
+    <img alt="version" src="https://img.shields.io/badge/version-1.8.2-green">
     <img alt="stars" src="https://img.shields.io/github/stars/virmuran/ImgSnag-WeChat?style=social">
 </div>
 <br>
@@ -224,6 +224,9 @@ python -m venv .venv
 **Q：点「检查更新」提示连不上 GitHub？**
 `api.github.com` 在国内网络下经常连不上，公司网络更常直接限制访问 —— 这不影响程序的其他功能，换成手动下载新版本即可（每次发布都会附上安装包与便携包）。启动时那次自动检查也是静默的：连不上就什么都不说，不会弹窗打扰你。
 
+**Q：装了加速器/公司网络能上网，为什么还是提示连不上？**
+v1.8.2 起这种情况已修复。原因是这类网络会做 TLS 转发（用自己装的根证书重签流量），而 Python 的 `requests` 只信任自带的 certifi 证书列表，于是「证书没被信任」被误报成「网络不通」。程序现在会把 **Windows 证书存储里的根证书合并进 CA 包**再去请求（本机实测：对端证书由加速器的根证书签发，合并后 1.2 秒返回正常）。若仍失败，提示也会明确说是证书问题，而不是笼统说网络不通。
+
 ## 打包发版
 
 ```bash
@@ -262,8 +265,9 @@ ImgSnag-WeChat/
 │   ├── test_filter_rules.py   # 屏蔽尺寸与过滤规则回归测试（63 项，纯逻辑）
 │   ├── test_naming.py         # 图库文件夹命名回归测试（162 项，纯逻辑：非法字符/保留名/超长/撞名）
 │   ├── test_library.py        # 历史批次扫描回归测试（56 项，纯逻辑：自然序/容错/上限/标题反推）
-│   ├── test_updater.py        # 版本检测回归测试（91 项，纯逻辑，网络分支用注入的假数据）
-│   └── test_ui_smoke.py       # 界面回归测试（301 项，离屏跑，含保存落盘端到端、专属文件夹、历史批次浏览、缩放/拖动、屏蔽撤销、设置记忆、关于与更新）
+│   ├── test_updater.py        # 版本检测回归测试（120 项，纯逻辑；UP-7 走真实的 fetch_latest_release，UP-8 合并 CA 包）
+│   ├── test_history.py        # 下载历史回归测试（21 项，纯逻辑、临时 db：重新解析不抹掉下载记录）
+│   └── test_ui_smoke.py       # 界面回归测试（312 项，离屏跑，含保存落盘端到端、专属文件夹、历史批次浏览、缩放/拖动、屏蔽撤销、设置记忆、关于与更新）
 ├── tools/                     # 诊断脚本（排查微信改版用，不参与打包）
 │   ├── e2e_article_download.py     # 端到端跑生产下载链路，对比新旧画质（推荐先用这个）
 │   ├── probe_wechat_quality.py     # 量化某篇文章压缩档 vs 原图的差距
@@ -304,7 +308,7 @@ ImgSnag-WeChat/
 
 欢迎提交 Issue 和 Pull Request。改动提取逻辑（`extractor.py`）时，请一并说明对应的微信页面结构特征，方便回归验证。
 
-改动后先跑回归测试（六个文件、789 项，离屏无需显示器）：
+改动后先跑回归测试（七个文件、850 项，离屏无需显示器）：
 
 ```bash
 .venv\Scripts\python.exe tests\run_all.py
@@ -315,6 +319,36 @@ ImgSnag-WeChat/
 ## 更新日志
 
 > 唯一版本记录。用户向说明见 [GitHub Releases](https://github.com/virmuran/ImgSnag-WeChat/releases)。
+
+### v1.8.2 (2026-09-23)
+
+修一个「网络明明是通的却报连不上」的证书问题（用户实测：同网络下 ChemCal 能更新、ImgSnag 不能）。
+
+**根因（本机实测证据）**：用户机器上装了加速器，它对流量做 TLS 转发、用自己装的
+`SteamTools Certificate` 根证书重签证书；这张根证书装在 **Windows 证书存储**里，于是：
+
+| 客户端 | 证书来源 | 结果 |
+|---|---|---|
+| `urllib`（ChemCal 用的） | Windows 证书存储 | ✅ 1.3s 拿到 Release |
+| `requests`（ImgSnag 用的） | 只认 certifi 自带的 CA 列表 | ❌ `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate` |
+
+界面把「证书没被信任」翻译成了「无法连接 GitHub，请检查网络」—— 文案把用户引向错误的方向。
+
+- 🔐 **`system_ca_bundle()`：把系统证书存储合并进 CA 包**（`updater.py`）：certifi + Windows 的 ROOT/CA，写成 PEM 后作为 `verify=` 传给 requests；缓存到 `~/.imgsnag_wechat/ca_bundle.pem`（7 天过期、临时文件 + `os.replace` 原子写）；**非 Windows 或一张证书都读不到时返回 None**，退回 requests 默认行为 —— 半个包比没有包更危险。任何异常都不抛（检查更新是锦上添花，不该崩界面）
+- 🧯 **证书失败单独给一句准确的话**：不再笼统说「无法连接」，而是点明「这条网络链路在用自签名证书转发流量（公司网络或加速器常见）」，并提示关掉加速器/代理再试 —— 用户该做的动作完全不同
+- ✅ 修复后真实联网验证：`ok=True, current=1.8.1, latest=1.8.1, has_update=False`，CA 包 292 KB / 159 张证书，耗时 1.2s
+- ✅ 测试：`tests/test_updater.py` 98 → **120 项**（UP-8 覆盖构建/缓存命中不重建/过期重建/枚举失败→None/读不到证书→None/无 `enum_certificates`→None/自动建目录；UP-9 证书错误文案；UP-7 加断言 `verify=` 用的确实是合并包，且拿不到包时**不许传**）；七个文件合计 **850 项**
+- 🧪 反向验证：「不传 verify=」→ 抓到；「证书失败退回模糊提示」→ 抓到；「CA 包不缓存」→ 抓到
+
+### v1.8.1 (2026-09-21)
+
+两个用户实测报出的 bug：
+
+- 🐛 **「检查更新」必报错**：`check_for_updates` 按注入契约 `fetch(url, timeout)` 两参调用取数函数，但真联网用的 `fetch_latest_release` 只收 `timeout` —— 点「检查更新」就报 `takes from 0 to 1 positional arguments but 2 were given`。之前的测试全用注入的假 fetch（按两参写），真联网这条路径**从没被走到过**。修复为签名一致，并新增 UP-7：mock 掉 requests 层走**真实的** `fetch_latest_release`，这类契约漂移再也漏不掉
+- 🐛 **重新解析已下载的链接，下载记录凭空消失**：`history_manager.add` 是「先删后插」—— 同一 URL 重新解析时，done 那行连同保存路径被整行删掉，换成一条「已解析、0 下载」。修复为：**已有下载（done/partial 且有路径）时只刷新解析时间/图片数/备注，下载状态、张数、路径原样保留**（图还在磁盘上，记录就该还在）；没有下载记录的照旧覆盖。解析失败（文章被删是常态）同样毁不掉下载记录
+- 🧰 `tests/run_all.py` 修掉一个编码坑：stdout 里有 `✗/✅` 符号，被别的工具以 GBK 管道调起时 print 报告直接 `UnicodeEncodeError` 崩掉，连 `_last_run.txt` 都来不及写（表现为闸门 rc=1 但报告是上一轮旧内容）—— stdout/stderr 强制 UTF-8
+- ✅ 测试：新增 `tests/test_history.py`（**21 项**，纯逻辑、临时 db）；`tests/test_updater.py` 91 → **98 项**（UP-7）；`tests/test_ui_smoke.py` 301 → **312 项**（UI-27：真实 HistoryManager 走解析完成/解析失败回调，断言记录存活、「查看」仍可用）；七个文件合计 **828 项**
+- 🧪 反向验证：「add 退回先删后插」→ test_history + UI-27 **抓到**；「fetch 签名退回单参」→ UP-7 **抓到**
 
 ### v1.8.0 (2026-09-21)
 

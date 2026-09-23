@@ -69,17 +69,44 @@ class HistoryManager:
             conn.commit()
 
     def add(self, source_url, total_images=0, success_images=0, save_path="", status="done", note=""):
-        """添加/更新一条历史记录：每条 URL 始终只保留一行（先删后插），返回新ID"""
+        """添加一条解析/下载记录（同一 URL 只保留一行，返回该行 id）。
+
+        v1.8.1 修复：**重新解析不许抹掉下载记录**。以前是「先删后插」——
+        已下载过的链接再解析一次，done 那行连同 save_path 被整个删掉，
+        换成一条「已解析、0 下载」，看起来就像下载凭空消失了。
+        现在改成：
+        - 已有下载（done/partial 且有 save_path）→ 只刷新解析时间/图片数/备注，
+          下载状态、张数、保存路径**原样保留**（图还在磁盘上，记录就该还在）
+        - 没有下载记录（scanned/failed）→ 照旧整体覆盖
+        """
         now = datetime.now().isoformat()
         with self._connect() as conn:
-            conn.execute("DELETE FROM history WHERE source_url = ?", (source_url,))
-            cur = conn.execute(
-                "INSERT INTO history (source_url, parsed_at, total_images, success_images, save_path, status, note) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (source_url, now, total_images, success_images, save_path, status, note)
-            )
+            row = conn.execute(
+                "SELECT id, status, save_path FROM history WHERE source_url = ?",
+                (source_url,),
+            ).fetchone()
+            if row is None:
+                cur = conn.execute(
+                    "INSERT INTO history (source_url, parsed_at, total_images, success_images, save_path, status, note) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (source_url, now, total_images, success_images, save_path, status, note)
+                )
+                conn.commit()
+                return cur.lastrowid
+            entry_id, old_status, old_path = row
+            if old_status in ("done", "partial") and old_path:
+                conn.execute(
+                    "UPDATE history SET parsed_at = ?, total_images = ?, note = ? WHERE id = ?",
+                    (now, total_images, note, entry_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE history SET parsed_at = ?, total_images = ?, success_images = ?, "
+                    "save_path = ?, status = ?, note = ? WHERE id = ?",
+                    (now, total_images, success_images, save_path, status, note, entry_id),
+                )
             conn.commit()
-            return cur.lastrowid
+            return entry_id
 
     def update(self, entry_id, success_images=None, save_path=None, status=None, note=None):
         """更新已有记录的部分字段"""
