@@ -7,7 +7,11 @@
 命名规则（用户可见）：``2026-09-18_164633_秋天的第一杯奶茶``
     · 日期在前 —— 按名字排序就是时间顺序
     · 带时分秒 —— 同一天可能下好几篇，只到「日」会撞车
-    · 标题     —— 一眼看出这堆图是哪篇文章的；取不到就兜底「微信图片」
+    · 标题     —— 一眼看出这堆图是哪篇文章的；取不到就用兜底名
+
+兜底名**由调用方传入**（``fallback=``），通常是当前站点适配器的
+``SiteAdapter.fallback_title``（微信是「微信图片」）—— 本模块不认识任何站点，
+只认识"标题为空时该填什么"这件事本身。
 """
 import os
 import re
@@ -29,8 +33,11 @@ _RESERVED = {
     *(f'LPT{i}' for i in range(1, 10)),
 }
 
-#: 抓不到文章标题时的兜底名
-FALLBACK_TITLE = '微信图片'
+#: 抓不到标题、且调用方也没给兜底名时的**最终**兜底。
+#: 站点各自的兜底名（微信是「微信图片」）由 SiteAdapter.fallback_title 提供，
+#: 经 folder_name(fallback=...) 传进来 —— 本模块不内置任何站点名，
+#: 否则新增站点时还得回头改这里。
+FALLBACK_TITLE = '图片'
 
 #: Windows 传统路径上限。普通 API 超过这个长度直接打不开（要 \\?\ 前缀）
 MAX_PATH = 260
@@ -68,19 +75,21 @@ def sanitize_title(raw, max_len: int = MAX_TITLE_LEN) -> str:
     return s
 
 
-def folder_name(title, when: datetime | None = None, max_len: int = MAX_TITLE_LEN) -> str:
+def folder_name(title, when: datetime | None = None, max_len: int = MAX_TITLE_LEN,
+                fallback=None) -> str:
     """生成一次下载的专属文件夹名：``2026-09-18_164633_标题``。
 
-    标题取不到时用 FALLBACK_TITLE 兜底 —— 保证**永远**返回一个合法名字，
+    标题取不到时用 `fallback` 兜底（调用方传当前站点的兜底名，如微信的「微信图片」），
+    连 `fallback` 也没有才用 FALLBACK_TITLE —— 保证**永远**返回一个合法名字，
     这样调用方不必到处判空。
     """
     when = when or datetime.now()
-    safe = sanitize_title(title, max_len) or FALLBACK_TITLE
+    safe = sanitize_title(title, max_len) or fallback or FALLBACK_TITLE
     return f'{when:%Y-%m-%d}_{when:%H%M%S}_{safe}'
 
 
 def folder_name_for(parent, title, when: datetime | None = None,
-                    max_path: int = MAX_PATH) -> str:
+                    max_path: int = MAX_PATH, fallback=None) -> str:
     """按父目录长度反推标题能占多少字，保证最终全路径仍在 Windows 上限内。
 
     超长路径的后果不是报错而是「写不进去」，所以宁可把标题截短，也不能让路径超长。
@@ -93,7 +102,7 @@ def folder_name_for(parent, title, when: datetime | None = None,
     prefix = f'{when:%Y-%m-%d}_{when:%H%M%S}_'
     budget = max_path - len(os.path.abspath(parent)) - 1 - len(prefix) - _LEN_RESERVE
     max_len = min(MAX_TITLE_LEN, budget)
-    return folder_name(title, when, max_len=max_len)
+    return folder_name(title, when, max_len=max_len, fallback=fallback)
 
 
 def unique_dir(parent, name) -> str:

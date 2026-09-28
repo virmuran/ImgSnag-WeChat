@@ -38,7 +38,7 @@ def pick_target(arg):
     """传图片地址就直接用；传文章链接就抓页面、取正文体积最大的一张。"""
     if 'mmbiz.qpic.cn' in arg:
         return arg
-    from web_image_dl.extractor import extract_image_urls
+    from web_image_dl.sites.weixin import extract_image_urls
     r = requests.get(arg, headers=HEADERS, timeout=30)
     log(f'文章 HTTP {r.status_code}，HTML {len(r.text)/1024:.0f} KB')
     urls = extract_image_urls(r.text)

@@ -32,6 +32,7 @@ ROOT = os.path.dirname(HERE)
 REPORT = os.path.join(HERE, '_last_run.txt')
 
 DEFAULT_FILES = [
+    'test_sites.py',           # 站点适配器接口与注册表（纯逻辑）
     'test_extractor.py',       # 提取/画质/保存链路（纯逻辑）
     'test_filter_rules.py',    # 屏蔽尺寸与过滤规则（纯逻辑）
     'test_naming.py',          # 图库文件夹命名与清洗（纯逻辑）

@@ -570,6 +570,11 @@ def test_empty_guide_and_enter(app):
         app.sendEvent(win.url_input, QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
         QApplication.processEvents()
         eq(len(warned), 1, '回车触发了「解析」流程（非公众号链接被拦下并提示）')
+        # 提示里的站点名要由注册表拼出来 —— 写死「微信公众号」的话，
+        # 将来加了新站点，用户看到的仍是旧文案
+        warn_text = ' '.join(str(a) for a in warned[0]) if warned else ''
+        check('微信公众号' in warn_text,
+              f'提示里列出了当前支持的站点（来自注册表）：{warn_text[:70]!r}')
 
         app.sendEvent(win.url_input, QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.ShiftModifier))
         QApplication.processEvents()
@@ -1461,6 +1466,11 @@ def test_auto_library_folder(app):
             win2 = ImageDownloaderApp()
             win2.show()
             QApplication.processEvents()
+            # 兜底名由站点适配器提供（微信是「微信图片」）。真实路径下它由
+            # _start_worker 设好，这里直接构造窗口不走到那一步，所以手动补上；
+            # 不补的话会退化成 naming 的通用兜底（见下面的 (b3)）
+            from web_image_dl.sites.weixin import weixin as _wx
+            win2._adapter = _wx
             win2._article_title = ''
             add_images(win2, 1)
             run(win2)
@@ -1469,6 +1479,20 @@ def test_auto_library_folder(app):
             eq(sorted(os.listdir(os.path.join(lib, fallback_dirs[0]))), ['img_01.png'],
                '兜底命名的那批也正常落盘')
             win2.close()
+            QApplication.processEvents()
+
+            # ---- (b3) 没有站点上下文 → 退回 naming 的通用兜底 ----
+            # 钉住「通用模块不内置任何站点名」：少了适配器就该是中性的「图片」，
+            # 而不是照样冒出「微信」——否则加第二个站点时这里会悄悄给错名字
+            win4 = ImageDownloaderApp()
+            win4.show()
+            QApplication.processEvents()
+            win4._article_title = ''
+            add_images(win4, 1)
+            run(win4)
+            generic = [n for n in os.listdir(lib) if n.endswith('图片') and '微信' not in n]
+            eq(len(generic), 1, '无适配器时用通用兜底名「图片」')
+            win4.close()
             QApplication.processEvents()
 
             # ---- (c) 同名撞车不覆盖 ----

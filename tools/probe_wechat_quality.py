@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
-from web_image_dl.extractor import extract_image_urls, to_compressed_url, to_original_url
+from web_image_dl.sites.weixin import extract_image_urls, to_compressed_url, to_original_url
 
 _LOGFILE = None
 

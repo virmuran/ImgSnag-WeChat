@@ -52,8 +52,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from web_image_dl.extractor import (
-    clean_url,
+from web_image_dl.extractor import clean_url
+from web_image_dl.sites.weixin import (
     extract_image_urls,
     extract_title,
     is_wechat_url,

@@ -23,10 +23,10 @@ from .worker import FetchWorker, ImageInfo
 from .widgets import FlowLayout, ThumbnailItem, ImageViewer, SidebarButton, SIDEBAR_WIDTH, THUMB_HEIGHT
 from .history_manager import history_manager, HistoryEntry
 from .blocked_config import blocked_config
-from .extractor import is_wechat_url
+from .sites import get_adapter, supported_names
 from .file_utils import unique_path
 from .save_worker import SaveWorker
-from .naming import folder_name_for, unique_dir
+from .naming import folder_name_for, unique_dir, FALLBACK_TITLE
 from .library import scan_batch, title_from_folder, MAX_BATCH_BYTES
 from .settings import (
     settings, K_GEOMETRY, K_WINDOW_STATE, K_SORT_INDEX,
@@ -101,6 +101,9 @@ class ImageDownloaderApp(QMainWindow):
         self._pending_history_id = None
         #: 本篇文章的标题（解析时由 worker 取出），用来给下载文件夹命名
         self._article_title = ""
+        #: 本次解析用的站点适配器（由 worker 按来源挑好）。界面靠它拿两样站点知识：
+        #: 兜底文件夹名、URL 列的短地址显示
+        self._adapter = None
         #: 最近一次真正落盘的目录，「打开图库」优先打开它
         self._last_save_folder = ""
         #: 是否正在「浏览历史图库」——此时展示的图已经在本地，下载按钮要禁用，
@@ -726,6 +729,7 @@ class ImageDownloaderApp(QMainWindow):
         self._preview_index = -1
         self._browsing_history = False   # 开始新解析 = 离开历史浏览（下载按钮恢复）
         self._article_title = ""      # 新的一次解析，标题重新取
+        self._adapter = None          # 适配器同样重取（由新的 worker 决定）
         self.download_btn.setEnabled(False)
         self.select_all_btn.setEnabled(False)
         self.select_all_btn.setText("全选")
@@ -982,6 +986,14 @@ class ImageDownloaderApp(QMainWindow):
             base = os.path.expanduser("~")
         return os.path.join(base, "ImgSnagWeChat")
 
+    def _fallback_title(self) -> str:
+        """当前解析所用站点的兜底文件夹名。
+
+        站点自己的兜底名（微信是「微信图片」）比 naming 的通用默认更贴切，
+        所以优先用它；没有适配器（如浏览历史时）才退回通用默认。
+        """
+        return getattr(self._adapter, "fallback_title", "") or FALLBACK_TITLE
+
     def _make_batch_folder(self, parent: str) -> str:
         """在 parent 下建一个「本次专属子文件夹」，返回其路径。
 
@@ -989,7 +1001,8 @@ class ImageDownloaderApp(QMainWindow):
         建不出来（盘符没了、无写权限）会抛 OSError，由调用方决定怎么退。
         """
         os.makedirs(parent, exist_ok=True)
-        folder = unique_dir(parent, folder_name_for(parent, self._article_title))
+        folder = unique_dir(parent, folder_name_for(
+            parent, self._article_title, fallback=self._fallback_title()))
         os.makedirs(folder, exist_ok=True)
         return folder
 
@@ -1175,6 +1188,8 @@ class ImageDownloaderApp(QMainWindow):
         include_scripts = is_url and self.script_cb.isChecked()
         prefer_original = self.original_cb.isChecked()
         self.worker = FetchWorker(source, is_url, include_scripts, prefer_original)
+        # 适配器由 worker 按来源挑好（挑法见 sites/__init__.py），界面只管记下来
+        self._adapter = self.worker.adapter
         self.worker.progress.connect(self._on_progress)
         self.worker.image_loaded.connect(self._on_image_loaded)
         self.worker.all_done.connect(self._on_all_done)
@@ -1218,11 +1233,11 @@ class ImageDownloaderApp(QMainWindow):
         if is_url and not text.lower().startswith('https://'):
             text = 'https://' + text
             self.url_input.setPlainText(text)
-        if is_url and not is_wechat_url(text):
+        if is_url and get_adapter(text, is_url=True) is None:
             QMessageBox.warning(self, "不支持的链接",
-                "本版本专精微信公众号文章图片提取。\n\n"
-                "请粘贴 mp.weixin.qq.com 开头的公众号文章链接，\n"
-                "或直接粘贴公众号文章的 HTML 源码。")
+                f"本版本目前支持：{supported_names()}。\n\n"
+                "请粘贴对应站点的文章链接，\n"
+                "或直接粘贴文章页面的 HTML 源码。")
             return
         if not is_url and len(text) < 100:
             QMessageBox.warning(self, "提示",
@@ -1237,12 +1252,15 @@ class ImageDownloaderApp(QMainWindow):
 
     @staticmethod
     def _short_url(url):
-        """URL 列只留尾部 ID —— 反正全是 mp.weixin.qq.com/s/ 开头，前缀白占大半列宽"""
+        """URL 列只留尾部 ID —— 各站点链接常有固定且冗长的前缀，白占大半列宽。
+
+        裁剪规则交给适配器（微信剥掉 `https://mp.weixin.qq.com/s/`）。
+        这里显式传 is_url=True：历史列表一屏几十行都在调它，
+        而 HTML 分支要走特征扫描，绝不能让它对一坨源码做全文匹配。
+        """
         u = url or ""
-        for prefix in ("https://mp.weixin.qq.com/s/", "http://mp.weixin.qq.com/s/"):
-            if u.startswith(prefix):
-                return u[len(prefix):]
-        return u
+        adapter = get_adapter(u, is_url=True)
+        return adapter.display_url(u) if adapter else u
 
     def _refresh_history(self):
         entries = history_manager.get_all(limit=200)
