@@ -39,6 +39,7 @@ DEFAULT_FILES = [
     'test_library.py',         # 历史批次文件夹扫描与排序（纯逻辑）
     'test_updater.py',         # 版本检测与检查更新（纯逻辑，不联网）
     'test_history.py',         # 下载历史：重新解析不抹掉下载记录（纯逻辑，临时 db）
+    'test_tray.py',            # 托盘与关闭窗口行为（离屏）
     'test_ui_smoke.py',        # 界面回归（离屏）
 ]
 

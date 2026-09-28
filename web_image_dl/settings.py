@@ -30,6 +30,9 @@ K_LAST_SAVE_DIR = "io/last_save_dir"    # 上次保存到哪个目录（现在�
 K_LIBRARY_DIR = "io/library_dir"        # 图库根目录；空 = 用系统「图片」下的 ImgSnagWeChat
 K_AUTO_CHECK_UPDATE = "update/auto_check"    # 启动后是否自动检查新版本
 K_LAST_UPDATE_CHECK = "update/last_check"    # 上次检查更新的时间戳（做 6 小时节流）
+#: 点窗口右上角「X」时的行为：ask=每次询问 / tray=最小化到托盘 / quit=直接退出
+#: 改回来的唯一入口是托盘右键菜单「关闭窗口时」（别再占界面一格）
+K_CLOSE_ACTION = "ui/close_action"
 
 #: 类型由默认值决定：bool / int / str
 DEFAULTS = {
@@ -41,6 +44,7 @@ DEFAULTS = {
     K_LIBRARY_DIR: "",
     K_AUTO_CHECK_UPDATE: True,
     K_LAST_UPDATE_CHECK: 0,
+    K_CLOSE_ACTION: "ask",
 }
 
 

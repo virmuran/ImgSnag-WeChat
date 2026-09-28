@@ -223,12 +223,15 @@ def test_shutdown_with_running_thread(app):
     from web_image_dl.app import ImageDownloaderApp
 
     print('\n[UI-7] 关窗时能等到后台线程收尾（不触发 QThread destroyed 崩溃）')
-    win = ImageDownloaderApp()
-    win.show()
-    QApplication.processEvents()
-    win.close()          # closeEvent 里会 cancel + wait
-    QApplication.processEvents()
-    check(True, '关窗流程未抛异常')
+    # 必须走隔离：这条要真的 win.close()，而关闭行为默认「每次询问」，
+    # 走到询问分支就会弹对话框 exec() —— 离屏下永久阻塞（详见 _isolated_config）
+    with _isolated_config():
+        win = ImageDownloaderApp()
+        win.show()
+        QApplication.processEvents()
+        win.close()          # closeEvent 里会 cancel + wait
+        QApplication.processEvents()
+        check(True, '关窗流程未抛异常')
 
 
 def test_download_through_gui(app):
@@ -329,7 +332,7 @@ class _isolated_config:
         import time
 
         from web_image_dl.blocked_config import blocked_config
-        from web_image_dl.settings import K_LAST_UPDATE_CHECK, settings
+        from web_image_dl.settings import K_CLOSE_ACTION, K_LAST_UPDATE_CHECK, settings
 
         self.dir = tempfile.mkdtemp(prefix='imgsnag_iso_')
         self._blocked = blocked_config
@@ -341,6 +344,11 @@ class _isolated_config:
         # 别让测试真的联外：窗口构造 2 秒后会自动查一次新版本，把「上次检查时间」
         # 设成现在，6 小时节流就会挡住它。UI-22 里自己覆盖这个值来测节流本身。
         settings.set(K_LAST_UPDATE_CHECK, int(time.time()))
+        # 关闭行为也必须在隔离里定死：本文件各处收尾都调 win.close()，而出厂的
+        # 「每次询问」会弹 CloseChoiceDialog 并 exec() —— 离屏下 exec() 永久阻塞且
+        # 不报错，整个测试文件会静默挂死（加托盘那次就这么卡了 18 分钟）。
+        # 统一设成「直接退出」：closeEvent 只做收尾，不弹框、不收托盘。
+        settings.set(K_CLOSE_ACTION, 'quit')
         return self
 
     def __exit__(self, *exc):
@@ -1964,6 +1972,19 @@ def test_reparse_keeps_download(app):
 
 def main():
     app = QApplication.instance() or QApplication([])
+
+    # 护栏：绝不让 CloseChoiceDialog.exec() 在离屏下跑起来。
+    # 离屏平台的 exec() 会**永久阻塞且不报错** —— 一处漏网就能让整个发版闸门
+    # 静默挂死（加托盘功能那次就卡了 18 分钟才被发现）。这里换成一个不阻塞的替身，
+    # 万一将来有用例忘了定死关闭行为，也只是「窗口没关掉」，闸门照样跑完并报错。
+    from web_image_dl.app import CloseChoiceDialog
+
+    def _no_block_exec(self):
+        self.choice, self.remember = 'cancel', False
+        return 0
+
+    CloseChoiceDialog.exec = _no_block_exec
+
     test_preview_scale(app)
     test_cancel_button(app)
     test_copy_matches_impl(app)

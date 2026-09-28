@@ -14,10 +14,13 @@ from PySide6.QtWidgets import (
     QProgressBar, QFileDialog, QMessageBox, QStatusBar, QTextEdit,
     QComboBox, QStackedWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QSizePolicy, QSpacerItem, QFrame,
-    QDialog, QTextBrowser,
+    QDialog, QTextBrowser, QMenu, QSystemTrayIcon,
 )
 from PySide6.QtCore import Qt, QEvent, QTimer, QThread, Signal, QUrl, QStandardPaths
-from PySide6.QtGui import QShortcut, QKeySequence, QColor, QDesktopServices, QImage, QImageReader
+from PySide6.QtGui import (
+    QShortcut, QKeySequence, QColor, QDesktopServices, QImage, QImageReader,
+    QAction, QActionGroup, QIcon,
+)
 
 from .worker import FetchWorker, ImageInfo
 from .widgets import FlowLayout, ThumbnailItem, ImageViewer, SidebarButton, SIDEBAR_WIDTH, THUMB_HEIGHT
@@ -31,7 +34,7 @@ from .library import scan_batch, title_from_folder, MAX_BATCH_BYTES
 from .settings import (
     settings, K_GEOMETRY, K_WINDOW_STATE, K_SORT_INDEX,
     K_FILTER_SMALL, K_PREFER_ORIGINAL, K_FORMAT, K_LAST_SAVE_DIR,
-    K_LIBRARY_DIR, K_AUTO_CHECK_UPDATE, K_LAST_UPDATE_CHECK,
+    K_LIBRARY_DIR, K_AUTO_CHECK_UPDATE, K_LAST_UPDATE_CHECK, K_CLOSE_ACTION,
 )
 from .updater import (
     check_for_updates, UpdateInfo, CHECK_INTERVAL, SOURCE_URL,
@@ -41,6 +44,18 @@ try:
     from version import VERSION
 except ImportError:  # 打包/异常路径下不阻断启动
     VERSION = ""
+
+
+def resource_path(name: str) -> str:
+    """资源文件路径：打包后在 _internal（sys._MEIPASS），源码模式在项目根目录。
+
+    与 main.py 里的同名函数保持一致。托盘图标得在这里自己找一遍 —— 窗口是在本模块
+    构造的，够不着 main 的局部作用域。
+    """
+    base = getattr(sys, '_MEIPASS', None)
+    if not base:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 class _UpdateCheckThread(QThread):
@@ -86,7 +101,56 @@ ABOUT_HTML = f"""
 """
 
 
+class CloseChoiceDialog(QDialog):
+    """点窗口「X」时的三选一 —— 最小化到托盘 / 直接退出 / 取消
+
+    只在「关闭窗口时 = 每次询问」（出厂默认）下弹出。勾上「记住我的选择」就写进
+    `settings.close_action`，之后点 X 直接照办、不再打扰；想改回来走**托盘右键菜单
+    → 关闭窗口时** —— 那是唯一入口（界面上不再多占一格）。
+
+    ⚠ 离屏（offscreen）下 `exec()` 会永久阻塞且不报错，测试切勿触发本对话框；
+    请直接调 `_resolve_close_action()` / `_minimize_to_tray()`。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("关闭 ImgSnag")
+        self.setMinimumWidth(420)
+
+        #: 结果 —— "tray" / "quit" / "cancel"（点 X 或 Esc 关掉时保持 cancel）
+        self.choice = "cancel"
+        self.remember = False
+
+        layout = QVBoxLayout(self)
+        tip = QLabel("要收进右下角托盘继续后台运行（下载中的图不会被中断），还是直接退出？")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        self.remember_box = QCheckBox("记住我的选择（可在托盘右键菜单「关闭窗口时」改回）")
+        layout.addWidget(self.remember_box)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        for text, value, is_default in (("最小化到托盘", "tray", True),
+                                        ("退出 ImgSnag", "quit", False),
+                                        ("取消", "cancel", False)):
+            btn = QPushButton(text)
+            if is_default:
+                btn.setDefault(True)
+            btn.clicked.connect(lambda _=False, v=value: self._choose(v))
+            row.addWidget(btn)
+        layout.addLayout(row)
+
+    def _choose(self, value):
+        self.choice = value
+        self.remember = self.remember_box.isChecked()
+        self.accept()
+
+
 class ImageDownloaderApp(QMainWindow):
+    #: 关闭窗口时的行为 key → 显示名（存 settings 的 K_CLOSE_ACTION）
+    CLOSE_LABELS = (("ask", "每次询问"), ("tray", "最小化到托盘"), ("quit", "直接退出"))
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"ImgSnag 微信公众号版 v{VERSION}" if VERSION else "ImgSnag 微信公众号版")
@@ -117,6 +181,18 @@ class ImageDownloaderApp(QMainWindow):
         self._update_thread: _UpdateCheckThread | None = None
         self._last_update_info: UpdateInfo | None = None
 
+        # 右下角托盘：收进去之后程序继续在后台跑（下载不会被打断）
+        self._tray: QSystemTrayIcon | None = None
+        #: 托盘右键菜单要长期持有 —— PySide6 里 wrapper 一被回收就连带删掉底层 C++ 对象
+        self._tray_menu: QMenu | None = None
+        self._close_actions: dict = {}
+        #: True = 本次关闭是真退出，不再走托盘逻辑（托盘菜单「退出」等入口会先置位）
+        self._really_quit = False
+        #: 收托盘前的窗口状态（最大化/普通），唤回时原样还原 —— 别用 showNormal()
+        self._pre_tray_state = None
+        #: 首次收托盘时提示一次「还在后台跑」，之后不再打扰
+        self._tray_tip_shown = False
+
         # 右键屏蔽回调
         ThumbnailItem.on_block_size = self._on_block_size
 
@@ -125,6 +201,7 @@ class ImageDownloaderApp(QMainWindow):
         self._restore_settings()
         self._refresh_history()
         self._refresh_blocked()
+        self._setup_tray()
 
         # 启动后自动查一次新版本。延迟 2 秒：先让首屏起来，别跟用户抢那一下
         QTimer.singleShot(2000, self._maybe_silent_update_check)
@@ -709,6 +786,166 @@ class ImageDownloaderApp(QMainWindow):
         self.settings.set(K_PREFER_ORIGINAL, self.original_cb.isChecked())
         self.settings.sync()
 
+    # ================================================================
+    #  右下角托盘与关闭行为
+    # ================================================================
+
+    @staticmethod
+    def _tray_available() -> bool:
+        """系统托盘是否可用（抽成方法，便于离屏测试替换）"""
+        return QSystemTrayIcon.isSystemTrayAvailable()
+
+    def _setup_tray(self):
+        """右下角托盘图标 —— 收进去之后程序继续在后台跑
+
+        关闭行为由 K_CLOSE_ACTION 决定（ask / tray / quit，出厂 ask）。
+        托盘不可用的环境里静默跳过，点 X 仍照原样退出 —— 绝不出现
+        「窗口不见了、程序还在」这种找不回来的状态。
+        """
+        if not self._tray_available():
+            return None
+        icon_path = resource_path("ImgSnag.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
+        tray = QSystemTrayIcon(icon, self)
+        tray.setToolTip(f"ImgSnag 微信公众号版 v{VERSION}" if VERSION else "ImgSnag 微信公众号版")
+        tray.setContextMenu(self._build_tray_menu())
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray = tray
+        return tray
+
+    def _build_tray_menu(self) -> QMenu:
+        """托盘右键菜单（与「托盘是否可用」解耦，离屏测试可直接取用）
+
+        ⚠ 返回的 QMenu 必须长期持有（self._tray_menu）—— PySide6 里 wrapper 一被
+        回收就连带删掉底层 C++ 对象，菜单随即失效，而报错点往往出现在**下一步**。
+        """
+        menu = QMenu(self)
+        self._add_action(menu, "显示主窗口", self._restore_from_tray)
+        self._add_action(menu, "打开图库", self._on_open_library)
+        menu.addSeparator()
+
+        # 「关闭窗口时」—— 记住选择之后想改回来，这里是唯一入口（界面上不再多占一格）
+        behavior = menu.addMenu("关闭窗口时")
+        self._close_group = QActionGroup(self)
+        self._close_group.setExclusive(True)
+        self._close_actions = {}
+        for key, label in self.CLOSE_LABELS:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(key == self._resolve_close_action())
+            act.triggered.connect(lambda _checked=False, k=key: self._set_close_action(k))
+            self._close_group.addAction(act)
+            behavior.addAction(act)
+            self._close_actions[key] = act
+
+        menu.addSeparator()
+        self._add_action(menu, "退出 ImgSnag", self._quit_app)
+        self._tray_menu = menu
+        return menu
+
+    @staticmethod
+    def _add_action(menu, text, slot):
+        """菜单项一律走这里建 —— 统一拿掉 triggered 的 checked 参数，槽函数不必带默认参"""
+        act = menu.addAction(text)
+        act.triggered.connect(lambda _checked=False: slot())
+        return act
+
+    def _on_tray_activated(self, reason):
+        """单击 / 双击托盘图标 → 唤回主窗口（右键弹菜单，不误唤回）"""
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._restore_from_tray()
+
+    def _minimize_to_tray(self) -> bool:
+        """把主窗口收进托盘（窗口对象仍存活，下载线程照跑不中断）
+
+        收托盘也算一次落盘 —— 此后即使直接从托盘退出或被强杀，界面偏好都不丢。
+        """
+        if self._tray is None:          # 没有托盘就别把窗口藏起来，否则再也找不回来
+            self._really_quit = True
+            self._shutdown()
+            QApplication.quit()
+            return False
+        self._pre_tray_state = self.windowState()
+        self._save_settings()
+        self.hide()
+        if not self._tray_tip_shown:
+            self._tray_tip_shown = True
+            self._tray.showMessage(
+                "ImgSnag 仍在后台运行",
+                "双击右下角图标可重新打开窗口；右键图标 → 退出 ImgSnag 可完全关闭。",
+                QSystemTrayIcon.MessageIcon.Information, 5000)
+        return True
+
+    def _restore_from_tray(self):
+        """从托盘唤回主窗口（保持收进去之前的大小状态）
+
+        还原用 setWindowState 而不是 showNormal() —— 后者会把最大化的窗口压回普通大小。
+        """
+        self.show()
+        if self._pre_tray_state is not None:
+            self.setWindowState(self._pre_tray_state)
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_app(self):
+        """真正退出 —— 不再询问、不再收托盘（托盘菜单「退出」走这里）"""
+        self._really_quit = True
+        self._shutdown()
+        QApplication.quit()
+
+    def _stop_threads(self):
+        """等后台线程收尾。
+
+        QThread 在线程仍在运行时被销毁，Qt 会直接报
+        `QThread: Destroyed while thread is still running` 并可能崩溃退不出。
+        只在**真退出**时做这一步 —— 收托盘时下载要继续跑。
+        """
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(3000)
+        if self.save_worker is not None and self.save_worker.isRunning():
+            self.save_worker.wait(5000)   # 落盘不做半途中断，等它写完
+        if self._update_thread is not None and self._update_thread.isRunning():
+            self._update_thread.wait(3000)   # 版本检查只读，等它回来，免得线程被销毁
+
+    def _shutdown(self):
+        """退出前收尾：等线程 + 摘掉托盘图标 + 落盘（可重复调用）"""
+        self._stop_threads()
+        if self._tray is not None:
+            self._tray.hide()
+        self._save_settings()
+
+    def _resolve_close_action(self) -> str:
+        """当前生效的关闭行为（未知取值一律退回「每次询问」）"""
+        action = str(self.settings.get(K_CLOSE_ACTION) or "").strip()
+        return action if action in dict(self.CLOSE_LABELS) else "ask"
+
+    def _set_close_action(self, action) -> bool:
+        """写入关闭行为偏好，并同步托盘菜单里的勾选"""
+        if action not in dict(self.CLOSE_LABELS):
+            return False
+        self.settings.set(K_CLOSE_ACTION, action)
+        self.settings.sync()
+        act = self._close_actions.get(action)
+        if act is not None and not act.isChecked():
+            act.setChecked(True)
+        return True
+
+    def _ask_close_action(self):
+        """弹三选一，返回 (action, remember)。⚠ 离屏下别调它（exec 会永久阻塞）"""
+        dlg = CloseChoiceDialog(self)
+        if self.isHidden():          # 从托盘里弹：父窗口隐藏时对话框会落到屏幕外
+            dlg.adjustSize()
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                geo = dlg.frameGeometry()
+                geo.moveCenter(screen.availableGeometry().center())
+                dlg.move(geo.topLeft())
+        dlg.exec()
+        return dlg.choice, dlg.remember
+
     def _switch_page(self, index):
         self.stack.setCurrentIndex(index)
         self.btn_parse.setChecked(index == 0)
@@ -1166,20 +1403,41 @@ class ImageDownloaderApp(QMainWindow):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
-        """关窗前等后台线程收尾。
+        """点窗口右上角「X」的关闭流程
 
-        QThread 在线程仍在运行时被销毁，Qt 会直接报
-        `QThread: Destroyed while thread is still running` 并可能崩溃退不出。
+        出厂默认「每次询问」（本次界面上三选一，可勾选记住）；记住之后点 X 直接照办、
+        不再打扰，改回来的入口在托盘右键菜单「关闭窗口时」。收进托盘只是 hide() ——
+        窗口对象仍存活、下载线程照跑，从托盘唤回即可；只有真退出才等线程收尾并落盘。
+
+        ⚠ 真退出分支必须显式调 `QApplication.quit()`。main.py 里设了
+        `setQuitOnLastWindowClosed(False)`（否则一收托盘，Qt 就把「最后一个窗口关了」
+        当成该结束进程），代价是**关闭最后一个窗口也不再自动退出** —— 只 accept 的话
+        窗口没了、进程却还活着，而且托盘已被摘掉，用户再也找不回来。
         """
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(3000)
-        if self.save_worker is not None and self.save_worker.isRunning():
-            self.save_worker.wait(5000)   # 落盘不做半途中断，等它写完
-        if self._update_thread is not None and self._update_thread.isRunning():
-            self._update_thread.wait(3000)   # 版本检查只读，等它回来，免得线程被销毁
-        self._save_settings()
-        super().closeEvent(event)
+        if self._really_quit:              # 已知要退出的路径（托盘菜单「退出」等）
+            self._shutdown()
+            event.accept()
+            return
+
+        action = self._resolve_close_action()
+        if action == "ask":
+            action, remember = self._ask_close_action()
+            if remember and action != "cancel":
+                self._set_close_action(action)
+
+        if action == "tray":
+            event.ignore()
+            self._minimize_to_tray()
+            return
+
+        if action == "quit":
+            self._really_quit = True
+            self._shutdown()
+            event.accept()
+            QApplication.quit()            # ★ 少这一句就是个「窗口全没了、进程还在」的幽灵
+            return
+
+        event.ignore()                     # 取消：留在界面上继续用
 
     def _start_worker(self, source, is_url):
         self._reset_before_parse()

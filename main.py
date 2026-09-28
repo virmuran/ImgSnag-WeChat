@@ -17,6 +17,10 @@ def resource_path(name):
 
 def main():
     app = QApplication(sys.argv)
+    # 主窗口可以被收进右下角托盘（只是 hide()）—— 此时「最后一个窗口关闭」并不代表要退出，
+    # 否则一收托盘程序当场就没了。真退出统一走 ImageDownloaderApp._quit_app() /
+    # closeEvent 的 quit 分支 → QApplication.quit()。
+    app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("ImgSnag 微信公众号版")
     app.setApplicationVersion(VERSION)
     icon_path = resource_path("ImgSnag.ico")
