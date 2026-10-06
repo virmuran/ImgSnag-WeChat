@@ -138,16 +138,38 @@ CASES = [
      '[11] 导入时不建库', TEST_WEB),
 
     # ── 返回手势、剪贴板、小图过滤、保存画质（第二轮反馈后的新增）────────
-    ('返回键不再交给网页的层级（侧滑直接退回桌面）', MAIN_JAVA,
-     'if (web != null && web.canGoBack()) {', 'if (false) {',
-     '[10] 返回键先让网页往回退', TEST_WEB),
+    #
+    # 下面五条是"侧滑返回到底管不管用"的**全部必要件**。少任何一件，真机上
+    # 表现都一模一样：**侧滑直接退回桌面**，而且一句错都不报 —— 只能一条条钉。
+    # （上一轮只改了 onBackPressed，就属于"看着改了、其实没接上"。）
+    ('没注册返回回调（targetSdk 35+ 上 onBackPressed 根本不会被调用）', MAIN_JAVA,
+     'registerOnBackInvokedCallback', 'registerOnBackInvokedCallbackX',
+     '[10] API 33+ 注册了返回回调', TEST_WEB),
+    ('注册前忘了判系统版本（老系统上找不到那些新类，一进就崩）', MAIN_JAVA,
+     'if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {',
+     'if (true) {',
+     '[10] 注册前判了系统版本', TEST_WEB),
+    ('清单里不再声明预测性返回（日后动 targetSdk 会悄悄变回去）', MANIFEST,
+     '        android:enableOnBackInvokedCallback="true"\n', '',
+     '[10] 清单里显式声明了预测性返回', TEST_WEB),
+    ('返回不再让网页退（侧滑直接退回桌面）', MAIN_JAVA,
+     'if (webDepth > 0 && web != null) {', 'if (false) {',
+     '[10] 有层可退时交给网页自己退', TEST_WEB),
+    ('网页漏报一处层级（那一步侧滑就会穿透到底）', WEBUI,
+     "    history.pushState({view:v}, '', '#' + v);\n    depth++; reportDepth();",
+     "    history.pushState({view:v}, '', '#' + v);",
+     '[9] reportDepth() 每次进出层级都调了', TEST_WEB),
+    ('翻页也压返回栈（翻 5 张要划 5 次才退得出去）', WEBUI,
+     "  history.replaceState({view:view, viewer:i}, '', '');",
+     "  history.pushState({view:view, viewer:i}, '', '');",
+     '[10] openViewer 里只压一层', TEST_WEB),
     ('剪贴板桥的名字两边不一致', MAIN_JAVA,
      'BRIDGE_NAME = "imgsnag"', 'BRIDGE_NAME = "imgsnagx"',
      '[10] 注入名与页面里读的名字一致', TEST_WEB),
-    ('剪贴板桥方法漏了注解（不暴露给 JS，且不报错）', MAIN_JAVA,
+    ('桥方法漏了注解（不暴露给 JS，且一点都不报错）', MAIN_JAVA,
      '        @JavascriptInterface\n        public String read()',
      '        public String read()',
-     '[10] 桥方法标了注解', TEST_WEB),
+     'read() 标了 @JavascriptInterface', TEST_WEB),
     ('页面不再压返回栈（大图关不掉、层级退不了）', WEBUI,
      'history.pushState', 'history.pushStateX',
      '[9] 视图切换会压一层返回栈', TEST_WEB, -1),
@@ -174,6 +196,38 @@ CASES = [
      "    if (html or '').strip():\n        return html, False",
      "    if False:\n        return html, False",
      '[12] 把 HTML 当源码', TEST_WEB),
+
+    # ── P3：版本更新检测（第三轮反馈后的新增）─────────────────────────
+    # 这一组的共同点：**错了都不报错**，只是"永远说已是最新"或者"永远说有新版"，
+    # 而这两种表现用户都不会截图来问 —— 正是最需要钉住的那一类。
+    ('去下载不走 Java 的桥（在壳里点外链哪也去不了）', WEBUI,
+     'if (window.imgsnag && window.imgsnag.open){ window.imgsnag.open(url); return true; }',
+     'if (false){ return true; }',
+     '[9] 去下载走 Java 的桥', TEST_WEB),
+    # 这条是桌面版真踩过的坑：签名与注入契约不一致，而测试全用假 fetch，
+    # 真联网那条路从没被走到 —— 用户一点就报"多传了一个参数"。
+    ('更新检测的取数函数少一个参数（真联网才发现）', WEB_PY,
+     'def _update_fetch(self, url, timeout=None):', 'def _update_fetch(self, url):',
+     '[13] 问到了远端信息', TEST_WEB),
+    ('时间不做时区归位（"今天 07:12"其实是北京 15:12）', WEB_PY,
+     '    return dt.astimezone() if dt.tzinfo else dt',
+     '    return dt',
+     '[13] 时间按本地时区显示', TEST_WEB),
+    ('更新宽限期归零（刚装完就提示有新版本）', WEB_PY,
+     'UPDATE_SLACK_MS = 60 * 1000', 'UPDATE_SLACK_MS = 0',
+     '[13] 只差几十秒不算更新', TEST_WEB),
+    ('挑资产时不看后缀（拿一个文本文件的时间去比）', WEB_PY,
+     "        apk = next((a for a in info.assets if a.name.lower().endswith('.apk')), None)",
+     "        apk = next((a for a in info.assets), None)",
+     '[13] 取的是 .apk 那个资产的时间', TEST_WEB),
+    ('安装时间不合理的值不设防（截断成负数 → 永远说有新版）', WEB_PY,
+     '        if installed_at < MIN_INSTALL_MS:\n            installed_at = 0',
+     '        pass',
+     '[13] 安装时间被截断成负数时不能报有更新', TEST_WEB),
+    ('问不到安装时间时硬说"没有新版"', WEB_PY,
+     "            'unknown': bool(remote_ms and not installed_at),",
+     "            'unknown': False,",
+     '[13] 问不到安装时间时如实说', TEST_WEB),
 ]
 
 #: 老用例不写"跑哪个测试文件"就默认跑 test_apk_app.py —— 免得为了加个字段

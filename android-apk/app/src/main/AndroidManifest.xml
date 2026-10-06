@@ -16,6 +16,13 @@
      （http://127.0.0.1:<端口>）。安卓 9 起默认**禁止明文 HTTP**，
      不显式放行的话表现是白屏。注意放行的只有回环地址这一条，
      不是全局开口子（见 res/xml/network_security_config.xml）。
+
+  4) enableOnBackInvokedCallback —— 显式接管**侧边滑动返回**。
+     安卓 13 起系统改用 OnBackInvokedDispatcher 派发返回，而 targetSdk 35+
+     的应用**默认就走这条路**，`onBackPressed()` 不再被调用 ——
+     表现是"侧滑直接退回桌面"，而且改了 onBackPressed 也毫无反应
+     （真机上踩过一次）。这里写明 = true 免得有人把 targetSdk 降回去时
+     行为悄悄变回去；配套的注册在 MainActivity.setupBack()。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -23,6 +30,7 @@
 
     <application
         android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"

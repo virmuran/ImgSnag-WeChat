@@ -95,7 +95,15 @@ def shot(chrome, url, name, budget=60000):
            f'--virtual-time-budget={budget}', f'--screenshot={path}', url]
     if 'headless-shell' not in os.path.basename(chrome).lower():
         cmd.insert(1, '--headless=new')
-    r = subprocess.run(cmd, capture_output=True, timeout=180)
+    # ⚠ 一张卡住不该让整批中断：早先 `subprocess.run` 超时直接抛栈退出，
+    #   结果是"前三张拍好了、第四张没了"，而报错信息是一整段 panic 回溯，
+    #   看半天看不出"其实只是最后一张没拍到"。
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print(f'  ❌ {name}  超过 180 秒还没截出来（多半是页面里还有没停的轮询，'
+              f'见 inject() 的冻结说明）')
+        return False
     ok = os.path.isfile(path) and os.path.getsize(path) > 2000
     size = os.path.getsize(path) // 1024 if os.path.isfile(path) else 0
     print(f'  {"✅" if ok else "❌"} {name}  ({size} KB)')
@@ -141,11 +149,25 @@ def inject(js):
     少写/多写一个 `}` 就是整段语法错误 —— 浏览器**一声不吭地扔掉**，
     表现是"注入的步骤永远不发生"，跟"页面没加载好"长得一模一样
     （大图那张怎么拍都是结果页，排查了一圈内核限制，最后发现是自己括号多了）。
+
+    另外这里**固定**追加一段"冻结轮询"：页面自身有个永不停止的状态轮询
+    （`tick()` 每 1.2s 发一次 `/api/state`）。在 `--virtual-time-budget` 下，
+    只要还有 fetch 在飞，浏览器就**暂停虚拟时钟** —— 于是预算永远到不了，
+    截图卡到真实 180 秒超时（本轮 04 历史页实测，而前一张同样的页面却是好的，
+    属"重跑就变、查起来最费劲"的那种）。冻结之后页面不再发请求，
+    虚拟时钟一口气跑完预算，四张图都稳。
     """
     a, b = js.count('{'), js.count('}')
     if a != b:
         raise RuntimeError(f'注入的脚本花括号不配对：{{ {a} 个、}} {b} 个 —— '
                            '整段会被当成语法错误扔掉，先修这里再拍')
+    # 等状态落定（网格/历史都画完）再把 tick 换空函数：它自己就不会再排下一次
+    # ⚠ 必须**同步**掐，不能等 setTimeout 再掐：虚拟时钟在还有 fetch 在飞时
+    #   是暂停的，而轮询永远有 fetch 在飞 → "过 2.6 秒再掐"那个定时器自己
+    #   就永远等不到（上一版实测 04 还是超时）。注入脚本跑在主脚本之后，
+    #   此时 busyTimer 已经排上了 —— 同步 clearTimeout + 换掉 tick，一次掐死；
+    #   首屏状态由 refresh()（一次性 fetch）照常画出来，不依赖轮询。
+    js += ("try{window.tick=function(){};clearTimeout(busyTimer);}catch(e){}")
     webui.PAGE = ORIG_PAGE.replace('</body>', f'<script>{js}</script></body>')
 
 

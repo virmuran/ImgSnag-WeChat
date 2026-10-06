@@ -80,7 +80,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -89,6 +89,7 @@ if _HERE not in sys.path:
 import imgsnag                                                       # noqa: E402
 import imgsnag_android                                               # noqa: E402
 import webui                                                         # noqa: E402
+from web_image_dl import updater                                     # noqa: E402
 from web_image_dl.history_manager import HistoryManager              # noqa: E402
 from web_image_dl.naming import folder_name                          # noqa: E402
 from web_image_dl.sites import get_adapter, supported_names          # noqa: E402
@@ -141,6 +142,31 @@ _MIME = {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
     '.gif': 'image/gif', '.webp': 'image/webp',
 }
+
+#: 版本更新检测的状态文件。**故意与偏好分开** —— 偏好是"用户的意思"，
+#: 这个只是"机器上次问到的答案"，混在一起会让 normalize_settings 的意图变模糊。
+UPDATE_FILE = 'update_check.json'
+
+#: 问哪个接口。安卓安装包挂在**滚动的预发布位** `apk-latest` 上：
+#: 每次云构建都先删掉整个 release 再重建，所以资产上的创建时间就是那次构建的时间。
+#: ⚠ 不能沿用桌面版那个 `/releases/latest` —— 它**只返回正式发布**，
+#: 看不见这个预发布位，结果是安卓版永远显示"已是最新"，而且不报任何错。
+#: 仓库名从同步来的 updater 里取，两处不会漂移。
+APK_RELEASE_TAG = 'apk-latest'
+APK_API_URL = (f'https://api.github.com/repos/{updater.GITHUB_REPO}'
+               f'/releases/tags/{APK_RELEASE_TAG}')
+APK_PAGE_URL = (f'https://github.com/{updater.GITHUB_REPO}'
+                f'/releases/tag/{APK_RELEASE_TAG}')
+
+#: 判定"有新版本"的宽限期（毫秒）。手机时钟与 GitHub 的服务器时钟总有几秒差，
+#: 不留余量的话"刚装完就提示有新版本"会反复出现 —— 用户只能学会无视它。
+UPDATE_SLACK_MS = 60 * 1000
+
+#: "本机安装时间"合理的下限（毫秒）= 2020-01-01。比这更早的一律当作"问不到"。
+#: 防的是这种错：Java 侧若用 int 去存毫秒时间戳，值会被截断成**负数**，
+#: 而负数在布尔判断里是"真" —— 结果就是每次检查都报"有新版本"，
+#: 比老实说"不知道"糟得多。手机时钟跑飞了也被这一条兜住。
+MIN_INSTALL_MS = 1577836800000
 
 
 # ============================================================================
@@ -204,11 +230,34 @@ def as_int(value, default=0) -> int:
         return default
 
 
+def _parse_iso(iso: str):
+    """ISO 时间串 → 本地时区的 datetime；认不出来返回 None。
+
+    GitHub 给的是 UTC（形如 `2026-10-06T07:12:33Z`），**必须转本地**再显示：
+    不转的话"今天 07:12 构建的"其实是北京 15:12，用户会以为那不是自己刚推的那次。
+    （`fromisoformat` 从 Python 3.11 起才认末尾的 `Z`，这里用 3.12/3.13，没问题。）
+    """
+    try:
+        dt = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    return dt.astimezone() if dt.tzinfo else dt
+
+
+def iso_ms(iso: str) -> int:
+    """ISO 时间 → 毫秒时间戳（认不出来返回 0）。
+
+    与 `pretty_time` 共用同一个解析 —— 显示的时间和拿来比大小的时间
+    必须来自同一处，否则会出现"界面说 15:12、判断却按 07:12"这种对不上的怪事。
+    """
+    dt = _parse_iso(iso)
+    return int(dt.timestamp() * 1000) if dt else 0
+
+
 def pretty_time(iso: str) -> str:
     """把 ISO 时间转成人话：今天 14:03 / 昨天 09:12 / 10-04 20:31"""
-    try:
-        dt = datetime.fromisoformat(iso)
-    except (TypeError, ValueError):
+    dt = _parse_iso(iso)
+    if dt is None:
         return iso or ''
     now = datetime.now()
     if dt.date() == now.date():
@@ -366,6 +415,10 @@ class Engine:
 
         self.settings_path = os.path.join(self.root, SETTINGS_FILE)
         self.settings = load_settings(self.settings_path)
+
+        #: 最近一次「检查更新」的结果。启动时从盘上读回来 —— 节流必须跨启动生效，
+        #: 否则每打开一次 App 就问一遍 GitHub（未认证请求按 IP 限流 60 次/小时）。
+        self.upd = self._load_update()
 
         self._reset()
 
@@ -931,6 +984,96 @@ class Engine:
         self._maybe_inspect()
         return snap
 
+    # ── ⑥ 版本更新 ──────────────────────────────────────────────────────────
+
+    def _load_update(self) -> dict:
+        try:
+            with open(os.path.join(self.root, UPDATE_FILE), encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}                                  # 没有 / 坏了都当"还没问过"
+
+    def _remember_update(self, out: dict):
+        try:
+            write_atomic(os.path.join(self.root, UPDATE_FILE),
+                         json.dumps(out, ensure_ascii=False).encode('utf-8'))
+        except OSError:
+            pass                              # 存不下只是下次多问一遍，不影响功能
+
+    def _update_fetch(self, url, timeout=None):
+        """给 `updater.check_for_updates` 用的取数函数。
+
+        签名必须与它的注入契约 `fetch(url, timeout) -> dict` **完全一致** ——
+        它按位置传两个参数。桌面版在这条上踩过（v1.8.0）：测试全用注入的假
+        fetch，真联网那条路从没被走到，用户一点就报
+        `takes from 0 to 1 positional arguments but 2 were given`。
+        """
+        resp = self._net()(
+            url,
+            headers={'Accept': 'application/vnd.github+json',
+                     'User-Agent': f'ImgSnag-Android/{self.version or "dev"}'},
+            timeout=timeout or updater.DEFAULT_TIMEOUT,
+        )
+        if not 200 <= resp.status < 300:
+            raise RuntimeError(f'HTTP {resp.status}')
+        return json.loads(resp.text or '{}') or {}
+
+    def check_update(self, installed_at: int = 0, force: bool = False) -> dict:
+        """问 GitHub：`apk-latest` 上那个安装包是不是比本机装的更新。
+
+        判据取**时间**（远端 APK 的创建时间 vs 本机安装时间），不是版本号 ——
+        预发布位的 tag 就叫 `apk-latest`，里面没有版本号；而且版本号在
+        "同版本号重新构建"时不会变，那恰恰是迭代期最常发生的情况。
+
+        `installed_at` 由 Java 侧给（`PackageManager` 的 lastUpdateTime）。
+        拿不到时（浏览器里调试、桥不在）返回 `unknown=True`：界面只报远端信息，
+        **不下"有没有新版"的结论** —— 猜一个结论比不给结论更糟。
+        """
+        now = time.time()
+        # 明显不合理的安装时间一律当"问不到"（负数、时间戳被截断、时钟跑飞）。
+        # 不设防的话 `installed_at` 为负数在布尔判断里是真，会算出"永远有新版本"。
+        installed_at = as_int(installed_at, 0)
+        if installed_at < MIN_INSTALL_MS:
+            installed_at = 0
+        with self.lock:
+            cached = dict(self.upd)
+        if not force and cached and (now - cached.get('_at', 0)) < updater.CHECK_INTERVAL:
+            cached['cached'] = True
+            return cached
+
+        info = updater.check_for_updates(fetch=self._update_fetch, api_url=APK_API_URL,
+                                         current=self.version)
+        apk = next((a for a in info.assets if a.name.lower().endswith('.apk')), None)
+        remote_ms = iso_ms(apk.created_at) if apk else 0
+
+        out = {
+            'ok': bool(info.ok and apk),
+            'cached': False,
+            'error': info.error or ('' if apk else 'GitHub 上还没有安卓安装包'),
+            'current': self.version,
+            'remote_version': (apk.version if apk else '') or '',
+            'remote_time': pretty_time(apk.created_at) if apk else '',
+            'remote_ms': remote_ms,
+            'installed_ms': installed_at,
+            #: 只有两边的时间都拿得到才敢下结论；宽限期见 UPDATE_SLACK_MS
+            'has_update': bool(remote_ms and installed_at
+                               and remote_ms > installed_at + UPDATE_SLACK_MS),
+            'unknown': bool(remote_ms and not installed_at),
+            'page_url': info.page_url or APK_PAGE_URL,
+            '_at': now,
+        }
+        with self.lock:
+            self.upd = out
+        if out['ok']:
+            self.log_line(f'更新检查：远端 {out["remote_version"] or "?"}'
+                          f'（{out["remote_time"]}），'
+                          + ('有新版本' if out['has_update'] else '已是最新'))
+        else:
+            self.log_line(f'更新检查失败：{out["error"]}')
+        self._remember_update(out)
+        return out
+
 
 # ============================================================================
 #  HTTP 服务
@@ -1045,6 +1188,16 @@ def make_handler(engine: Engine):
 
             if path == '/api/history':
                 return self._json({'items': engine.history()})
+
+            if path == '/api/update':
+                # 本机安装时间由网页带上来（它从 Java 的桥上取，见 webui.py）。
+                # 这是**同步**请求，最坏要等一个网络超时 —— 服务是每连接一个
+                # 线程的，所以它不会把轮询和缩略图一起卡住。
+                q = parse_qs(urlparse(self.path).query)
+                return self._json(engine.check_update(
+                    installed_at=as_int((q.get('at') or ['0'])[0], 0),
+                    force=(q.get('force') or [''])[0] in ('1', 'true', 'yes'),
+                ))
 
             if path.startswith('/img/'):
                 parts = path.strip('/').split('/')          # img/<sid>/<kind>/<i>

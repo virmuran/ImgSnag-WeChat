@@ -623,10 +623,12 @@ def test_inspect_tiny():
         eq(st['count'], 2, '两张图')
         eq(st['settings']['skip_tiny'], True, '默认就开着过滤')
 
+        # ⚠ 体检是解析**之后**在后台接着跑的：phase 到 ready 的那一刻，它可能
+        #   一张都还没量。所以必须**先等它跑完，再数请求** —— 反过来写就是一条
+        #   偶发红灯（三次里红一次、重跑就绿，查起来最费劲的那种）。
+        st = _wait_check(cli, 2)
         eq(fake.hits('/0'), 0, '体检只碰压缩档 —— 它就是要显示的那张，零额外流量')
         eq(fake.hits('/640'), 2, '两张的缩略图都量过了')
-
-        st = _wait_check(cli, 2)
         eq(st['check']['done'], 2, '两张都体检完')
         eq(st['check']['running'], False, '体检结束')
         eq(st['tiny'], [2], '只有第 2 张被认成小图（第 1 张 20 KB 不算小）')
@@ -784,7 +786,125 @@ def test_pick_source():
 
 
 # ============================================================================
-#  四、静态契约（跨语言、跨文件的对应关系）
+#  四、P3：版本更新检测
+# ============================================================================
+
+#: 更新检测用的假 GitHub 响应。远端那次构建比本机装上的时刻晚 12 分钟 ——
+#: 这样"有新版 / 没新版"两侧都有明确用例，而不是碰运气。
+APK_ASSET = 'ImgSnag_1.10.0_android_arm64.apk'
+APK_CREATED = '2026-10-06T07:12:33Z'        # 远端那个安装包的构建时刻（UTC）
+APK_INSTALLED = '2026-10-06T07:00:00Z'      # 本机上装着的那一份的时刻（UTC）
+
+
+def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest'):
+    """GitHub「按 tag 取某个发布」的假响应（只放我们真正会读的字段）。
+
+    故意混一个非 .apk 的资产进去：挑错了就会拿一个文本文件的时间去比，
+    而这种错**不会报任何错**，只是"永远说已是最新"。
+
+    ⚠ 这个名字要**排在 .apk 前面**。资产会被按名字排序，而排序是按字符码点：
+    '0'(48) < 'A'(65) < 'I'(73) < 'a'(97) —— 大写字母在小写**前面**。
+    早先叫 `checksums.txt`、后来改叫 `aaa-readme.txt`，两次都排在 apk 后面，
+    于是"随便挑第一个"这个 bug 被排序盖住了，拆坏用例照样绿
+    （反向验证抓出来的，抓了两次才对准）。
+    """
+    return json.dumps({
+        'tag_name': tag,
+        'html_url': 'https://github.com/virmuran/ImgSnag-WeChat/releases/tag/apk-latest',
+        'body': '更新说明',
+        'assets': [
+            {'name': '0-readme.txt', 'size': 12, 'browser_download_url': '',
+             'created_at': '2020-01-01T00:00:00Z'},
+            {'name': name, 'size': 11500000,
+             'browser_download_url': 'https://example.invalid/ImgSnag.apk',
+             'created_at': created},
+        ],
+    }, ensure_ascii=False)
+
+
+def test_update_check():
+    print('[13] 检查更新：比对"远端安装包的构建时间"与"本机安装时间"')
+    installed = web.iso_ms(APK_INSTALLED)
+    check(installed > 0, '测试自己的时间戳算得出来（ISO 末尾带 Z 也要认）')
+
+    tmp = tempfile.mkdtemp()
+    try:
+        fake = FakeGet(pages={ARTICLE_URL: article(), web.APK_API_URL: release_json()})
+        cli, _, _ = _boot(tmp, fake=fake)
+
+        # ① 正常情况：远端比本机新
+        r = cli.json(f'/api/update?at={installed}&force=1')
+        check(r['ok'], f'问到了远端信息：{r.get("error")!r}')
+        eq(r['remote_version'], '1.10.0', '版本号从资产名里读出来（tag 里没有版本号）')
+        eq(r['remote_ms'], web.iso_ms(APK_CREATED), '取的是 .apk 那个资产的时间')
+        check(r['remote_time'], f'构建时间给成人话：{r["remote_time"]!r}')
+        # 显示的必须是**本地时区**的时间。GitHub 给的是 UTC，不转的话
+        # "今天 07:12 构建"其实是北京 15:12 —— 用户会以为那不是自己刚推的那次。
+        local = datetime.fromisoformat(APK_CREATED.replace('Z', '+00:00')).astimezone()
+        check(local.strftime('%H:%M') in r['remote_time'],
+              f'时间按本地时区显示：{r["remote_time"]!r} 该包含 {local.strftime("%H:%M")}')
+        check(r['has_update'], '远端比本机新 → 提示有更新')
+        check('github.com' in r['page_url'], '给出的是去下载的页面')
+
+        # ② 本机那份比远端还新（用户自己装了更新的包）→ 不能说有更新
+        newer = web.iso_ms(APK_CREATED) + 3600_000
+        check(not cli.json(f'/api/update?at={newer}&force=1')['has_update'],
+              '本机更新时不能说"有新版本"')
+
+        # ③ 宽限期：只差 30 秒不算。手机时钟与 GitHub 服务器总有几秒差，
+        #    不留余量的话"刚装完就提示有新版本"会一直出现，用户就学会无视它了
+        edge = web.iso_ms(APK_CREATED) - 30_000
+        check(not cli.json(f'/api/update?at={edge}&force=1')['has_update'],
+              '只差几十秒不算更新（留着宽限期）')
+
+        # ④ 问不到本机安装时间（在电脑浏览器里调试就是这样）→ 只报远端，不下结论
+        r4 = cli.json('/api/update?force=1')
+        check(r4['ok'] and r4['unknown'], '问不到安装时间时如实说"不知道"')
+        check(not r4['has_update'], '不知道的时候不能乱说有更新')
+        eq(r4['remote_version'], '1.10.0', '但仍然把远端版本号报出来')
+
+        # ④′ 安装时间明显不合理（时间戳被 int 截断成负数、或手机时钟跑飞）→ 当"问不到"。
+        #     不设防的话：负数在布尔判断里是"真"，会算出"永远有新版本"。
+        r5 = cli.json('/api/update?at=-12345&force=1')
+        check(not r5['has_update'], '安装时间被截断成负数时不能报有更新')
+        check(r5['unknown'], '这种时候应该老实说"不知道"')
+
+        # ⑤ 节流：不带 force 的重复请求不该再联网
+        before = fake.hits('api.github.com')
+        check(before > 0, '确实问过 GitHub')
+        cli.json('/api/update')
+        cli.json('/api/update')
+        eq(fake.hits('api.github.com'), before, '节流生效：短时间内不再联网')
+        cli.json('/api/update?force=1')
+        eq(fake.hits('api.github.com'), before + 1, '手动点「检查」绕过节流')
+
+        # ⑥ 节流要跨启动生效（存盘），否则每开一次 App 就问一遍 GitHub
+        state = json.loads(read(os.path.join(tmp, web.UPDATE_FILE)))
+        eq(state.get('remote_version'), '1.10.0', '最近一次结果落了盘')
+        check(state.get('_at'), '落盘里带了检查时刻（下次启动据此决定要不要再问）')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ⑦ 接口问不通：要说人话，而且不能把服务带崩
+    tmp2 = tempfile.mkdtemp()
+    try:
+        cli2, _, _ = _boot(tmp2, fake=FakeGet(pages={ARTICLE_URL: article()}))
+        r = cli2.json('/api/update?force=1')
+        check(not r['ok'], '问不到时 ok=False')
+        check(r['error'] and 'Traceback' not in r['error'],
+              f'给出的是人话原因：{r["error"]!r}')
+        check('发布' in r['error'] or '仓库' in r['error'],
+              f'认得出"这个位置没有东西"：{r["error"]!r}')
+        # 一次检查失败不该把界面弄死
+        eq(cli2.json('/api/state')['phase'], 'idle', '检查失败之后服务照常')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+
+# ============================================================================
+#  五、静态契约（跨语言、跨文件的对应关系）
 # ============================================================================
 
 def test_page_contract():
@@ -853,6 +973,28 @@ def test_page_contract():
     check('appearance:none' in page, '开关是自绘的，不靠系统控件（各家 ROM 长得不一样）')
     check("classList.toggle('mini'" in page, '小图在网格里有标记')
 
+    # P3：更新入口
+    check('id="updBtn"' in page, '首页有检查更新的入口')
+    check("'/api/update?" in page, '页面会去问更新接口（带上参数）')
+    check('installedAt()' in page, '把本机安装时间一起带上（后端靠它判断）')
+    check(re.search(r'window\.[A-Za-z0-9_$]+\.open\(', page) is not None,
+          '去下载走 Java 的桥 —— 页面里点外链在壳里是出不去的')
+
+    # 大图翻页动画作用在 #vstage 上，不在图片本身：
+    # 图片自己还要管"适应/原大小"，两个 transform 叠一起会互相覆盖。
+    check('id="vstage"' in page, '大图外面单独包了一层用来做动画')
+    check('prefers-reduced-motion' in page, '系统开了"减少动效"就不硬播动画')
+
+    # 层级上报：Java 的返回回调只看这个数，网页漏报一处就等于那一步没接。
+    # ⚠ 数调用时要带 `;` —— 光数 `reportDepth()` 会把**函数定义**那一行
+    #   （`function reportDepth(){`）也算进去，于是少调一次照样"及格"。
+    #   这条是反向验证抓出来的：拆掉 setView 里那次上报，断言照样绿。
+    check('function reportDepth(' in page, '有"把层级报给 Java"这个动作')
+    calls = len(re.findall(r'reportDepth\(\);', page))
+    check(calls >= 4, f'reportDepth() 每次进出层级都调了（找到 {calls} 处）')
+    check(re.search(r'window\.[A-Za-z0-9_$]+\.depth\(', page) is not None,
+          '走的是桥上的 depth()')
+
 
 def test_java_contract():
     print('[10] 与 Java 的握手点（静态比对）')
@@ -920,13 +1062,52 @@ def test_java_contract():
         eq(len(re.findall(r'<domain[ >]', body)), 1,
            '只放行一个域，不是全局开明文')
 
-    # ⑦ 返回键与剪贴板桥（这两件事都在 Java 侧，本机验不了，只能钉契约）
-    check('onBackPressed' in main, 'Java 处理返回键（侧边滑动返回也走它）')
-    check('canGoBack()' in main and 'goBack()' in main,
-          '返回键先让网页往回退 —— 不这样的话侧滑就直接退回桌面')
-    check(re.search(r'@Override[\s\S]{0,120}?public void onBackPressed\s*\(\s*\)',
+    # ⑦ 返回键与网页桥（都在 Java 侧，本机验不了，只能钉契约）
+    #
+    # 这一组是"侧滑返回到底管不管用"的必要件。少任何一件，真机表现都一样：
+    # **侧滑直接退回桌面**，而且一句错都不报 —— 所以只能这样一条条钉住。
+    check(re.search(r'@Override[\s\S]{0,140}?public void onBackPressed\s*\(\s*\)',
                     main) is not None,
-          'onBackPressed 确实是一个覆写的方法（漏了 @Override 就是新写了个没人调的）')
+          'onBackPressed 是覆写（漏了 @Override 就是新写了个没人调的方法）')
+    check('registerOnBackInvokedCallback(' in main,
+          'API 33+ 注册了返回回调 —— targetSdk 35+ 上系统只走这条，'
+          '不注册的话 onBackPressed 压根不会被调用（真机上踩过）')
+    check(re.search(r'Build\.VERSION\.SDK_INT\s*>=\s*Build\.VERSION_CODES\.TIRAMISU',
+                    main) is not None,
+          '注册前判了系统版本（不判的话老系统上找不到那些新类，一进就崩）')
+    # ⚠ manifest 的注释里也写着 enableOnBackInvokedCallback 这个词（就为了讲清
+    #   为什么要有它），所以不能光查这个词 —— 得连属性名一起查。
+    #   `strip_comments` 摘的是 Java 的注释，摘不掉 XML 的 `<!-- -->`。
+    check('android:enableOnBackInvokedCallback="true"' in man,
+          '清单里显式声明了预测性返回（免得日后动 targetSdk 时行为悄悄变回去）')
+    # 光查"字段名出现过"太弱：字段声明还在、但 handleBack 里不再看它，
+    # 照样能凑齐这个字符串（反向验证抓出来的）。
+    check(re.search(r'if\s*\(\s*webDepth\s*>\s*0', main) is not None,
+          '返回的判据真的是"网页报上来的层级 > 0"')
+    check(re.search(r'evaluateJavascript\("history\.back\(\)"', main) is not None,
+          '有层可退时交给网页自己退（这样点关闭与按返回走的是同一条路）')
+
+    # 网页得真把层级报上来 —— 不报的话 Java 永远以为在最外层
+    check('reportDepth' in webui.PAGE and 'window.imgsnag.depth(' in webui.PAGE,
+          '网页每次进出层级都会同步给 Java')
+    # 翻页**不算**"进去"：只替换当前层。
+    # 早先跟"进场"共用同一个 pushState，翻 5 张就要划 5 次才退得出去。
+    body = re.search(r'function openViewer\([\s\S]*?\n\}', webui.PAGE)
+    check(body is not None, '页面里找得到 openViewer')
+    if body:
+        eq(body.group(0).count('history.pushState'), 1,
+           'openViewer 里只压一层（翻页不能再压，否则翻几张就要划几次）')
+        check('history.replaceState' in body.group(0),
+              '翻页走 replaceState（同一层里换内容）')
+
+    # 桥上的四个方法：JS 调的每一个都得标注解，否则点了一动不动
+    for meth in ('read', 'depth', 'open', 'installedAt'):
+        got = re.search(r'public\s+[\w<>\[\]]+\s+' + meth + r'\s*\(', main)
+        check(got is not None, f'桥上有 {meth}() 方法')
+        if got:
+            head = main[max(0, got.start() - 160):got.start()]
+            check('@JavascriptInterface' in head,
+                  f'{meth}() 标了 @JavascriptInterface（不标＝JS 调不到，还不报错）')
     bridge = re.search(r'BRIDGE_NAME\s*=\s*"([^"]+)"', main)
     check(bridge is not None, 'Java 里定义了注入给网页的对象名')
     # 两边的名字要**互相**对得上。别用 `f'window.{name}' in PAGE` 这种写法：
@@ -993,7 +1174,7 @@ def main():
     for fn in (test_helpers, test_full_chain, test_share_push, test_dedup_and_partial,
                test_partial_download, test_errors, test_net_failure_falls_back,
                test_album_failure, test_inspect_tiny, test_quality_toggle,
-               test_settings, test_pick_source, test_page_contract,
+               test_settings, test_pick_source, test_update_check, test_page_contract,
                test_java_contract, test_isolation):
         try:
             fn()

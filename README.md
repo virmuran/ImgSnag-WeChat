@@ -13,7 +13,7 @@
     <img alt="deps" src="https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-requests%20%2B%20PySide6-Essentials-blue">
 </div>
 <div>
-    <img alt="version" src="https://img.shields.io/badge/version-1.8.2-green">
+    <img alt="version" src="https://img.shields.io/badge/version-1.10.0-green">
     <img alt="stars" src="https://img.shields.io/github/stars/virmuran/ImgSnag-WeChat?style=social">
 </div>
 <br>
@@ -381,6 +381,30 @@ ImgSnag-WeChat/
 
 > 本段与 GitHub Release 正文使用**完全相同**的内容 —— 写一次，两处直接粘贴，不会出现两种说法。
 > 格式规范见 [`RELEASE_NOTES_TEMPLATE.md`](RELEASE_NOTES_TEMPLATE.md)；发版前跑 `python tools/check_release_notes.py` 校验两处逐字一致。
+
+### v1.10.0 (2026-10-06)
+
+安卓版有了完整界面：抓完先挑图再入相册、能看大图、有下载历史，还能检查更新。
+
+**新增**
+- 安卓版重做界面：抓完先在缩略图网格里挑，选好再存进相册，不再一股脑塞进去
+- 安卓版加了下载历史，可以重看上一批图，或按原地址重抓一次
+- 安卓版首页多了「从剪贴板」与「检查更新」
+
+**改进**
+- 安卓版大图可左右滑动翻页（带过渡动画），点右上角圆圈即可勾选或取消
+- 安卓版返回手势按层级退：关大图 → 退回上一页 → 再退才退出程序
+- 安卓版首页两个开关：保存原图 / 自动跳过小图（表情、二维码这类默认不勾选）
+
+**修复**
+- 安卓版翻过几张图之后，返回一次就能退出（原来翻几张就要往回划几次）
+- 抓到 PNG / GIF 的图不再被存成 .jpg（桌面版与安卓版）
+
+**兼容性提示**
+- 安卓版界面整体换新：原来只有「抓剪贴板链接」和「打开相册」两个按钮
+- 桌面版行为与数据位置完全没变，覆盖安装即可，历史与偏好都保留
+
+_测试 12 文件 / 1541 项 / 0 失败_
 
 ### v1.9.0 (2026-09-28)
 

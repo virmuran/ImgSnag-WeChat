@@ -17,16 +17,24 @@ Chaquopy 把 Python 源码打进 APK 后，"源码同目录的文件运行时还
   · 分享进来会**自动解析**，抓完停在结果页让你确认再入库（不直接写相册）
 
 ────────────────────────────────────────────────────────────────────────
-返回键：页面自己管好"层级"
+返回键：页面自己数楼层，报给 Java
 ────────────────────────────────────────────────────────────────────────
-系统的侧边滑动返回最终落到 Activity 的返回键，那边只做一件事：
-**WebView 能回退就回退**。所以这里的 `history.pushState` 就是返回层级本身 ——
+系统的侧边滑动返回最终落到 Activity 的返回回调，那边只做一件事：
+**听网页说现在在第几层**。所以这里的 `history.pushState` 就是返回层级本身 ——
 页面 push 了几层，返回手势就能退几层（关大图 → 回首页/历史页），
 退到最外层再划一次才退出 App。
 
-这条规定值得写在最显眼的地方：**凡是用户能"进去"的地方，都要 push 一层**，
-否则从那里侧滑就直接退回桌面 —— 手机上的第一直觉操作变成"退出应用"，
-是最容易被骂的那种 bug。
+⚠ 为什么是"网页报数"而不是让 Java 用 `WebView.canGoBack()`：
+那个值取决于 WebView 内部怎么记 pushState 产生的历史条目，实机行为不可预期。
+第一版就是因此"改了等于没改"，侧滑依旧直接退回桌面。`depth` 这个数由网页
+自己维护，Java 只照它办事，而且**这一层在本机就能测**（`reportDepth` 调了桥）。
+
+**两条规定**，值得写在最显眼的地方：
+
+  · 凡是用户能"进去"的地方，都要 push 一层 —— 否则从那里侧滑就直接退回桌面。
+    手机上的第一直觉操作变成"退出应用"，是最容易被骂的那种 bug。
+  · 翻页**不算"进去"**，只 `replaceState` —— 那只是同一个层级里换了内容。
+    早期版本翻 5 张就压 5 层，退出去得划 5 次，返回手势反而变成了惩罚。
 
 ────────────────────────────────────────────────────────────────────────
 剪贴板
@@ -122,6 +130,11 @@ input::placeholder{color:var(--sub)}
 }
 .sw:checked{background:var(--accent)}
 .sw:checked::after{transform:translateX(19px)}
+/* 设置行右侧的小动作按钮。用 .btn 的常态尺寸会把整行撑得很高，
+   也容易把左边的说明挤成两行。 */
+.setrow .btn{flex:0 0 auto; min-height:0; padding:9px 14px; font-size:14px}
+/* 真查出有新版本时才把标题点亮 —— 平时它就是个安静的入口 */
+#updTitle.on{color:var(--accent)}
 
 /* ── 状态条 ── */
 #status{display:none; margin:0 0 10px; padding:11px 13px; border-radius:12px;
@@ -202,6 +215,11 @@ input::placeholder{color:var(--sub)}
 #vbar span{flex:1; text-align:center; font-size:13px; color:#b9b9c0}
 #vbody{flex:1; overflow:auto; -webkit-overflow-scrolling:touch; display:flex;
       align-items:center; justify-content:center}
+/* 翻页动画作用在**这一层**，不直接作用在 #vimg 上：
+   图片自己还要受"适应 / 原大小"控制，两个 transform 叠在同一个元素上会
+   互相覆盖 —— 放大状态下翻页会先跳一下。分开就没有这个问题。 */
+#vstage{width:100%; height:100%; display:flex; align-items:center;
+        justify-content:center; will-change:transform,opacity}
 #vimg.fit{max-width:100%; max-height:100%; object-fit:contain}
 #vimg.full{max-width:none; max-height:none}
 /* 左右翻页按钮：手机上滑动为主，这是给"够不到/习惯点"的人留的 */
@@ -272,6 +290,16 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
       </div>
     </div>
 
+    <div class="card mt">
+      <div class="setrow">
+        <label>
+          <span class="sett" id="updTitle">版本更新</span>
+          <span class="setd" id="updDesc">看看 GitHub 上有没有更新的安装包</span>
+        </label>
+        <button class="btn" id="updBtn">检查</button>
+      </div>
+    </div>
+
     <p class="hint" style="margin:14px 2px 0" id="foot"></p>
   </section>
 
@@ -311,7 +339,7 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
     <button class="tb" id="vPick">勾选</button>
     <button class="tb" id="vSave">存这张</button>
   </div>
-  <div id="vbody"><img id="vimg" class="fit" alt=""></div>
+  <div id="vbody"><div id="vstage"><img id="vimg" class="fit" alt=""></div></div>
   <button class="vnav" id="vPrev" title="上一张">‹</button>
   <button class="vnav" id="vNext" title="下一张">›</button>
 </div>
@@ -325,6 +353,17 @@ var st = {phase:'idle'};
 var view = 'home', sid = '', sel = new Set(), tiny = new Set();
 var lastShare = '', lastPhase = '';
 var vIndex = 0, vFit = true;
+/* 网页在第几层。0 = 最外层（再退一次就该退出 App）。
+   Java 的返回回调只认这个数 —— 为什么不让它自己用 WebView.canGoBack()：
+   那个值取决于 WebView 内部怎么记 pushState 产生的历史条目，实机行为
+   不可预期（第一版就是因此"改了等于没改"）。这里由网页自己数楼层，
+   数完同步过去，语义就是"还能退几层"。 */
+var depth = 0;
+/* 系统开了"减少动效"就别硬播动画 */
+var reduced = false;
+try{ reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(e){}
+/* 最近一次更新检查的结果（后端返回什么就是什么） */
+var update = {};
 /* 用户有没有自己动过勾选。动过之后就不再"自动全选" ——
    否则体检每报出一张小图就把用户的选择重算一遍，
    表现是"我刚取消的勾选又自己回来了"。 */
@@ -377,6 +416,7 @@ function paintView(v){
 function setView(v, opts){
   if (!(opts && opts.fromPop) && v !== view){
     history.pushState({view:v}, '', '#' + v);
+    depth++; reportDepth();
   }
   paintView(v);
 }
@@ -387,9 +427,14 @@ window.addEventListener('popstate', function(e){
   var v = (e.state && e.state.view) || 'home';
   paintView(v);
   if (v === 'history') loadHistory();
+  // 退了一层就少一层。用 max 兜底：有的浏览器首次加载也会派发一次 popstate，
+  // 那一下不该把层级记成负数（负数会让 Java 那边永远判定"还有层可退"）。
+  depth = Math.max(0, depth - 1);
+  reportDepth();
 });
 // 栈底那一条换成我们自己的，免得后退退到 WebView 的初始条目上
 history.replaceState({view:'home'}, '', '#home');
+reportDepth();
 
 $('#back').onclick = function(){ history.back(); };
 $('#goHistory').onclick = function(){ setView('history'); loadHistory(); };
@@ -408,6 +453,43 @@ $('#clear').onclick = function(){ $('#url').value = ''; $('#url').focus(); };
 $('#url').onkeydown = function(e){
   if (e.key === 'Enter'){ e.preventDefault(); $('#url').blur(); startParse(); }
 };
+
+/* ── 与 Java 的桥 ──
+   四个方法（read / depth / open / installedAt）一律写成"桥不在就当没有"：
+   在电脑浏览器里直接开这个页面调试时 window.imgsnag 不存在，
+   这里若抛异常，后面的脚本整段都不会执行 —— 表现是"页面半死"，最难查。 */
+
+/* 把"现在在第几层"同步给 Java。它的返回回调照这个数决定：
+   还有层就退网页，退到底了才退出 App。 */
+function reportDepth(){
+  try{
+    if (window.imgsnag && window.imgsnag.depth) window.imgsnag.depth(depth);
+  }catch(e){ /* 没桥就算了 */ }
+}
+
+/* 打开外部链接（更新说明、下载页）。交给系统浏览器 ——
+   别在这个"壳"里迷路：壳里没有地址栏，退不出去就只能杀进程。 */
+function openExternal(url){
+  if (!url) return false;
+  try{
+    if (window.imgsnag && window.imgsnag.open){ window.imgsnag.open(url); return true; }
+  }catch(e){ /* 落到下面的兜底 */ }
+  try{ window.open(url, '_blank'); return true; }catch(e){}
+  return false;
+}
+
+/* 本机这个 App 是什么时候装的（毫秒时间戳）。0 = 问不到。
+   更新检查靠它跟远端安装包的构建时间比大小。 */
+function installedAt(){
+  try{
+    if (window.imgsnag && window.imgsnag.installedAt){
+      // ⚠ 不能写 `| 0`：毫秒时间戳远超 32 位整数范围，`| 0` 会把它截成负数，
+      // 于是"远端比本机新"永远判不出来，而且一句报错都没有。
+      return Number(window.imgsnag.installedAt()) || 0;
+    }
+  }catch(e){ /* 没桥 */ }
+  return 0;
+}
 
 /* 剪贴板：Java 侧注入的只读桥。浏览器里直接开这个页面时桥不存在，
    这时给一句人话（而不是点了没反应）。 */
@@ -540,20 +622,77 @@ function paintCheck(){
 }
 
 /* ── 看大图 ── */
-function openViewer(i){
-  vIndex = i;
-  $('#vimg').src = '/img/' + st.sid + '/f/' + i;
+
+/* 把"当前这张"画出来。与"怎么进场"分开写：
+   进场有"从网格点开"和"翻页"两条路，画的内容却是同一套 ——
+   混在一起写，两条路就会各漏一点（比如翻页时忘了更新右上角那个勾选状态）。 */
+function paintViewer(){
+  $('#vimg').src = '/img/' + st.sid + '/f/' + vIndex;
   $('#vimg').className = 'fit';
   vFit = true;
-  $('#vpos').textContent = i + ' / ' + st.count;
-  $('#vPick').textContent = sel.has(i) ? '取消勾选' : '勾选';
+  $('#vpos').textContent = vIndex + ' / ' + st.count;
+  $('#vPick').textContent = sel.has(vIndex) ? '取消勾选' : '勾选';
   // 只有一张时不给翻页按钮，免得点了没反应
   $('#vPrev').hidden = st.count <= 1;
   $('#vNext').hidden = st.count <= 1;
-  $('#viewer').hidden = false;
-  // 进大图 = 压一层。这样侧滑返回是"关掉大图"而不是"退回桌面"
-  history.pushState({view:view, viewer:i}, '', '');
 }
+
+/* 翻页的过渡：内容先顺着方向滑出去，换图，再从另一侧滑进来。
+   dir=1 往左走（看下一张），-1 往右走。
+   动的是 #vstage 而不是 #vimg —— 图片自己还要受"适应/原大小"控制，
+   两个 transform 放在同一个元素上会互相覆盖。 */
+function slideStage(dir, swap){
+  var stage = $('#vstage');
+  if (!dir || reduced){ swap(); return; }
+  stage.style.transition = 'transform .15s ease-out, opacity .15s ease-out';
+  stage.style.transform = 'translateX(' + (-26 * dir) + '%)';
+  stage.style.opacity = '.35';
+  setTimeout(function(){
+    swap();
+    stage.style.transition = 'none';
+    stage.style.transform = 'translateX(' + (26 * dir) + '%)';
+    stage.style.opacity = '.35';
+    requestAnimationFrame(function(){
+      stage.style.transition = 'transform .18s ease-out, opacity .18s ease-out';
+      stage.style.transform = 'translateX(0)';
+      stage.style.opacity = '1';
+      // 收干净内联样式，免得之后跟"放大后拖动"打架
+      setTimeout(function(){ stage.style.transition = ''; }, 220);
+    });
+  }, 155);
+}
+
+/* opts.dir：翻页方向（0/不传 = 不播动画） */
+function openViewer(i, opts){
+  var dir = (opts && opts.dir) || 0;
+  if ($('#viewer').hidden){
+    // 从网格点开：先露面再淡入，比"啪一下出现"顺眼
+    vIndex = i;
+    paintViewer();
+    $('#viewer').hidden = false;
+    if (!reduced){
+      var stage = $('#vstage');
+      stage.style.transition = 'none';
+      stage.style.transform = 'translateX(0)';
+      stage.style.opacity = '0';
+      requestAnimationFrame(function(){
+        stage.style.transition = 'opacity .18s ease-out';
+        stage.style.opacity = '1';
+        setTimeout(function(){ stage.style.transition = ''; }, 220);
+      });
+    }
+    // 进大图 = 压一层。这样侧滑返回是"关掉大图"而不是"退回桌面"
+    history.pushState({view:view, viewer:i}, '', '');
+    depth++; reportDepth();
+    return;
+  }
+  // 翻页：**只替换当前这一层，不压新的**。
+  // 早先这里跟"进场"共用同一个 pushState，于是翻过 5 张就得划 5 次才退得出去 ——
+  // 返回手势一下变成惩罚。翻页是"在同一层里换内容"，不是"又进了一层"。
+  slideStage(dir, function(){ vIndex = i; paintViewer(); });
+  history.replaceState({view:view, viewer:i}, '', '');
+}
+
 /* byPop=true 表示"已经在返回的路上了"，只负责收拾界面。
    不传则是用户主动关：交给 history.back() 走同一条返回路径 ——
    两条路合一，就不会出现"点关闭能关、侧滑返回关不掉"这种不一致。 */
@@ -564,12 +703,17 @@ function closeViewer(byPop){
   $('#vimg').src = '';
   $('#vimg').className = 'fit';
   vFit = true;
+  // 动画留下的内联样式要清掉，否则下次打开是"歪着"进来的
+  var stage = $('#vstage');
+  stage.style.transition = 'none';
+  stage.style.transform = '';
+  stage.style.opacity = '';
 }
 function step(d){
   var n = vIndex + d;
   if (n < 1){ toast('已经是第一张了'); return; }
   if (n > st.count){ toast('已经是最后一张了'); return; }
-  openViewer(n);
+  openViewer(n, {dir:d});
 }
 $('#vClose').onclick = function(){ closeViewer(); };
 $('#vPrev').onclick = function(){ step(-1); };
@@ -768,6 +912,75 @@ function refresh(){
   return api('/api/state').then(applyState);
 }
 
+/* ── 版本更新 ── */
+/* 判定全在后端（它有网络、也能读盘做节流），这里只把结论说成人话。
+   四态：查不到 / 有新版本 / 查到了但不知道本机装的是哪个 / 已是最新。 */
+var updUrl = '';
+function paintUpdate(){
+  var title = $('#updTitle'), desc = $('#updDesc'), btn = $('#updBtn');
+  updUrl = '';
+  title.className = '';
+  btn.disabled = false;
+  if (!update || update.current === undefined){
+    title.textContent = '版本更新';
+    desc.textContent = update && update.error ? update.error : '还没检查过';
+    btn.textContent = '检查';
+    return;
+  }
+  if (!update.ok){
+    title.textContent = '版本更新';
+    desc.textContent = update.error || '查不到 GitHub 上的发布';
+    btn.textContent = '重试';
+    return;
+  }
+  if (update.has_update){
+    title.textContent = '有新版本';
+    title.className = 'on';
+    desc.textContent = 'v' + (update.remote_version || '?')
+      + '（' + (update.remote_time || '') + '构建），点右边去下载';
+    btn.textContent = '去下载';
+    updUrl = update.page_url || '';
+    return;
+  }
+  if (update.unknown){
+    // 拿不到本机安装时间（在电脑浏览器里调试时就是这样）：
+    // 只说远端有什么，**不下"有没有新版"的结论** —— 猜一个比不给更糟
+    title.textContent = '版本更新';
+    desc.textContent = 'GitHub 上最新：v' + (update.remote_version || '?')
+      + '（' + (update.remote_time || '') + '）';
+    btn.textContent = '去看看';
+    updUrl = update.page_url || '';
+    return;
+  }
+  title.textContent = '已是最新';
+  desc.textContent = 'v' + (update.current || '')
+    + (update.remote_time ? ' · 与 GitHub 上那个（' + update.remote_time + '）一致' : '');
+  btn.textContent = '再检查';
+}
+
+function checkUpdate(force){
+  var btn = $('#updBtn');
+  btn.disabled = true;
+  if (force) $('#updDesc').textContent = '正在检查…';
+  // ⚠ 判"接口通了没有"不能用 `r.error`：正常响应里也有个 error 字段
+  //（那是"检查更新失败"的原因），跟 api() 自己出错时的形状撞上了。
+  // 用 current —— 后端每次都会给这个字段。
+  var q = '/api/update?at=' + installedAt() + (force ? '&force=1' : '');
+  return api(q).then(function(r){
+    update = (r && r.current !== undefined) ? r : {error: '连不上本机服务'};
+    paintUpdate();
+    if (force){
+      toast(update.ok
+        ? (update.has_update ? '有新版本 v' + update.remote_version : '已经是最新版')
+        : ('检查失败：' + (update.error || '网络不通')));
+    }
+  });
+}
+$('#updBtn').onclick = function(){
+  if (updUrl) return void openExternal(updUrl);
+  checkUpdate(true);
+};
+
 /* ── 轮询：兼顾"分享进来的内容" ── */
 var busyTimer = 0;
 function tick(){
@@ -794,8 +1007,12 @@ function tick(){
 }
 
 paintView('home');
+paintUpdate();
 refresh();
 tick();
+// 静默查一次更新。后端有 6 小时节流，所以并不是每次开 App 都会真的联网；
+// 手动点「检查」会带 force，绕过节流。
+checkUpdate(false);
 </script>
 </body>
 </html>

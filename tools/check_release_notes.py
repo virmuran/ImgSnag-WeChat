@@ -11,7 +11,7 @@
 
 退出码：
     0  通过（含历史版本软跳过）
-    1  当前版本两处不一致，或 README 结构缺失
+    1  当前版本两处不一致，或 README 结构缺失、顶部版本徽章与 version.py 不符
 """
 import difflib
 import io
@@ -106,6 +106,19 @@ def main():
         print("  ✓ README 含「## 更新日志」标题")
     else:
         print("  ✗ README 找不到「## 更新日志」标题")
+        ok = False
+
+    # 1b) 顶部版本徽章
+    #     它没有任何代码引用，属于纯手工落地点 —— 实测已静默漂过两个版本
+    #     （v1.8.2 的徽章一直挂到 v1.9.0 发布之后）。既然是人眼最常看到的地方，
+    #     就必须由闸门钉住；判据只认 shields.io 的 `badge/version-<ver>-` 这一段。
+    badge = re.search(r"badge/version-([0-9][0-9.]*)-", readme)
+    if badge is None:
+        print("  ! README 顶部没有版本徽章 —— 跳过本项")
+    elif badge.group(1) == ver:
+        print(f"  ✓ README 版本徽章 = v{ver}")
+    else:
+        print(f"  ✗ README 版本徽章是 v{badge.group(1)}，与 version.py 的 v{ver} 不一致")
         ok = False
 
     # 2) 当前版本段

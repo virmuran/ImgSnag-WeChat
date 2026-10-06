@@ -5,7 +5,9 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,6 +18,8 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -39,8 +43,8 @@ import java.util.Locale;
  *   2. 用一个 WebView 加载 {@code http://127.0.0.1:<端口>/} ——
  *      网格、大图预览、历史页都在那个网页里；
  *   3. 把「微信分享过来的文本」转交给界面（{@code imgsnag_web.push_share}）；
- *   4. 把返回键（含侧边滑动返回）交给网页的层级去处理
- *      （{@code onBackPressed} + 一个只读的剪贴板桥）。
+ *   4. 把返回键（含侧边滑动返回）交给网页的层级去处理 —— 见 {@link #setupBack()}。
+ *      另有一个只读的桥（剪贴板 / 层级上报 / 开外链 / 本机安装时间）。
  *
  * ── 为什么这套东西跑在本机的一个端口上 ──
  * 页面与接口**同源**：不需要处理跨域，也不需要写 JS↔Java 的桥。
@@ -102,6 +106,16 @@ public class MainActivity extends Activity {
     /** 兜底抓取的重入守卫：连点两次会开两条线程抢同一个中转目录。 */
     private volatile boolean running = false;
 
+    /**
+     * 网页报上来的"还有几层可退"。0 = 已经在最外层，返回就是退出 App。
+     *
+     * **为什么不用 `WebView.canGoBack()`**：那个值取决于 WebView 内部怎么记
+     * pushState 产生的历史条目，实机行为不可预期。第一版就是拿它当判据，
+     * 结果侧滑依旧直接退出 App，还因为"看着像改过了"白等了一轮云构建。
+     * 这个数由网页自己数、每次 push/pop 都同步一次，语义明确且本机可测。
+     */
+    private volatile int webDepth = 0;
+
     /** 网页迟迟不来时的看门狗。 */
     private final Runnable watchdog = new Runnable() {
         @Override
@@ -133,6 +147,7 @@ public class MainActivity extends Activity {
         webMod = Python.getInstance().getModule("imgsnag_web");
 
         setupWebView();
+        setupBack();
 
         findViewById(R.id.retry).setOnClickListener(new View.OnClickListener() {
             @Override
@@ -215,38 +230,68 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 返回键 —— 也包括手机的**侧边滑动返回手势**（它最终就是走这个回调）。
+     * 接管返回 —— 返回键与**手机的侧边滑动返回手势**最终都落到这里。
      *
-     * 规则只有一条：**网页还能往回退，就先让网页退**。
-     * 网页用 `history.pushState` 记着自己在第几层（大图 → 结果页 → 首页），
-     * 所以这一句就让侧滑能关掉大图、退回上一页；等网页退到底了
-     * （`canGoBack()` 为假）才真的退出 App。
-     *
-     * ⚠ 不写这个的后果很具体：侧滑永远直接退回桌面。那偏偏是手机上最顺手的
-     * 一个操作，一做就把 App 关掉 —— 用户第一轮反馈的就是这条。
-     *
-     * 与网页的约定：**凡是能让用户"进去"的地方，网页那边都要 pushState**，
-     * 否则那一步侧滑就会穿透到底（这条写在 webui.py 的文档头里，测试也钉着）。
+     * ⚠ 光覆写 `onBackPressed()` **不够**：安卓 13 起系统改用
+     * `OnBackInvokedDispatcher` 派发返回，而 targetSdk 35+ 的应用默认就走
+     * 这条路 —— `onBackPressed()` 根本不会被调用（覆写得再对也白搭，
+     * 而且一句错都不报）。所以 API 33+ 得注册一个回调，低版本才走旧方法。
+     * 真机上"侧滑永远直接退回桌面"就是踩在这上面：第一次只改了旧方法。
      */
+    private void setupBack() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {        // 33
+            try {
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                        OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                        new OnBackInvokedCallback() {
+                            @Override
+                            public void onBackInvoked() {
+                                handleBack();
+                            }
+                        });
+            } catch (Throwable t) {
+                // 个别 ROM 在这上面有毛病。注册不上就退回旧路 ——
+                // 旧路在新系统上通常已经不被调用，但总比在这里崩掉强。
+                log("⚠ 返回手势没接管上：" + t);
+            }
+        }
+    }
+
+    /**
+     * 返回到底做什么。新旧两条派发路径都走这一个函数 ——
+     * 分成两份实现，迟早会出现"侧滑一套、返回键另一套"的怪事。
+     */
+    private void handleBack() {
+        if (webDepth > 0 && web != null) {
+            // 交给网页自己退：它 popstate 里会把界面收拾干净（关大图 / 换视图）。
+            // 用 history.back() 而不是 WebView.goBack()，为的是让"点关闭"
+            // 和"按返回"走同一条路 —— 否则会出现一个能退、一个退不掉的怪事。
+            web.evaluateJavascript("history.back()", null);
+            return;
+        }
+        finish();               // 已经在最外层：退出 App
+    }
+
+    /** 安卓 13 以下走的是这条老路。 */
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        if (web != null && web.canGoBack()) {
-            web.goBack();
-            return;
-        }
-        super.onBackPressed();          // 已经在最外层：正常退出
+        handleBack();
     }
 
     // ──────────────────────────── 剪贴板桥 ────────────────────────────
 
     /**
-     * 给网页里「从剪贴板」按钮用的**只读**桥。
+     * 给网页用的**只读**桥（外加一个"打开链接"的动作）。
      *
-     * 只暴露一个 `read()`：把剪贴板里的纯文本和 HTML 一起交出去，仅此而已 ——
-     * 不写文件、不执行命令、不碰网络。网页是从 127.0.0.1 加载的自家页面，
-     * 而且外链一律交给系统浏览器打开（见 shouldOverrideUrlLoading），
-     * 所以这个桥不会被别的页面碰到。
+     * 四个方法各管一件事，都不碰文件、不执行命令：
+     *   · read()       —— 剪贴板里的纯文本与 HTML（「从剪贴板」按钮）
+     *   · depth(n)     —— 网页现在在第几层（返回手势的唯一判据）
+     *   · open(url)    —— 用系统浏览器打开 https（更新说明 / 下载页）
+     *   · installedAt()—— 本机安装时间（更新检查要跟远端比）
+     *
+     * 网页是从 127.0.0.1 加载的自家页面，而且外链一律交给系统浏览器打开
+     * （见 shouldOverrideUrlLoading），所以这个桥不会被别的页面碰到。
      *
      * ⚠ 方法必须标 `@JavascriptInterface` —— API 17 起只有标了的才暴露给 JS。
      * 忘了标的表现是"点了没反应"，而且**一点报错都没有**。
@@ -275,6 +320,53 @@ public class MainActivity extends Activity {
                 return "{}";
             }
             return out.toString();
+        }
+
+        /**
+         * 网页上报"现在在第几层"。只往内存里记一个数，不读不写任何东西。
+         * 这是返回手势唯一的判据，见 {@link #handleBack()}。
+         */
+        @JavascriptInterface
+        public void depth(int n) {
+            webDepth = Math.max(0, n);
+        }
+
+        /**
+         * 用系统浏览器打开一个链接（更新说明 / 下载页）。
+         *
+         * **只放行 https**：页面是我们自己发的，但它显示的内容来自抓来的文章，
+         * 白名单一条比事后追查便宜得多。
+         */
+        @JavascriptInterface
+        public String open(String url) {
+            if (url == null || !url.startsWith("https://")) {
+                return "bad";
+            }
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                return "ok";
+            } catch (Exception e) {
+                return "fail";      // 没装浏览器也得静静收场，不能崩
+            }
+        }
+
+        /**
+         * 本机这个 App 是什么时候装的（毫秒时间戳）。0 = 问不到。
+         *
+         * 更新检查靠它跟 GitHub 上那个安装包的构建时间比大小 —— 比版本号靠谱：
+         * 滚动发布位的 tag 里没有版本号，而且"同版本号重新构建"时版本号压根不变，
+         * 那恰恰是最常见的情况。返回 String 而不是 long：跨语言传数值的精度
+         * 问题没必要去踩，反正马上就变成数字了。
+         */
+        @JavascriptInterface
+        @SuppressWarnings("deprecation")
+        public String installedAt() {
+            try {
+                PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+                return String.valueOf(pi.lastUpdateTime);
+            } catch (Exception e) {
+                return "0";
+            }
         }
     }
 
