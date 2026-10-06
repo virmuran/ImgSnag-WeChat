@@ -477,8 +477,8 @@ def test_workflow():
     check('actions/checkout@v4' in wf, '先取代码')
     check("java-version: '17'" in wf, '装 JDK 17')
     check('assembleRelease' in wf, '构建的是 release 包（debug 包装给别人用不合适）')
-    check('gradle wrapper --gradle-version 8.13' in wf,
-          '生成 Gradle 8.13 wrapper（与 Chaquopy 17.0.0 官方配套一致）')
+    check("gradle-8.13-bin.zip" in wf,
+          '直接下载钉死的 Gradle 8.13（与 Chaquopy 17.0.0 官方配套一致，不依赖镜像自带版本）')
     check('actions/upload-artifact@v4' in wf, '把 APK 作为构建产物上传')
     check('contents: write' in wf, '给了发布 Release 的权限')
     check('gh release delete' in wf and 'gh release create' in wf,

@@ -11,10 +11,10 @@
 #   手动：仓库页面 → Actions → 左侧 "Build Android APK" → Run workflow
 # 跑完在 Actions 里能下 zip 产物，也会自动挂到 Releases 的 apk-latest 上。
 #
-# ── 为什么没有 gradlew ──
-# Gradle wrapper 里有个二进制 jar，塞进仓库不体面、也不透明。
-# 运行器自带 Gradle（9.x），但 Chaquopy 17.0.0 官方配套的是 Gradle 8.13，
-# 版本不对会报很难懂的错 —— 所以下面先在临时目录里生成 8.13 的 wrapper 再拷进来。
+# ── 为什么自己下载 Gradle ──
+# Chaquopy 17.0.0 官方配套的是 Gradle 8.13，版本不对会报很难懂的错。
+# 运行器镜像自带的是 Gradle 9.x，而且镜像本身还会换底（2026-10 起迁 Ubuntu 26）——
+# 依赖镜像里"恰好有什么"太脆，直接下载钉死的 8.13，一步到位。
 
 name: Build Android APK
 
@@ -99,18 +99,19 @@ jobs:
           keytool -list -keystore keystore/imgsnag.p12 -storetype PKCS12 \
                   -storepass imgsnag -alias imgsnag
 
-      - name: 生成 Gradle 8.13 wrapper
+      # 不用镜像自带的 Gradle（9.x）生成 wrapper —— 依赖镜像环境太脆，
+      # 直接下载钉死的 8.13（与 Chaquopy 17.0.0 官方 demo 配套）。
+      - name: 安装 Gradle 8.13
         run: |
-          mkdir -p /tmp/wrapper && cd /tmp/wrapper
-          gradle wrapper --gradle-version 8.13 --no-daemon --quiet
-          cp -r /tmp/wrapper/gradle /tmp/wrapper/gradlew /tmp/wrapper/gradlew.bat \
-                "$GITHUB_WORKSPACE/android-apk/"
-          chmod +x "$GITHUB_WORKSPACE/android-apk/gradlew"
-          cat "$GITHUB_WORKSPACE/android-apk/gradle/wrapper/gradle-wrapper.properties"
+          curl -fsSL --retry 3 -o /tmp/gradle.zip \
+            https://services.gradle.org/distributions/gradle-8.13-bin.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          echo "/tmp/gradle-8.13/bin" >> "$GITHUB_PATH"
+          /tmp/gradle-8.13/bin/gradle --version
 
       - name: 编译 release APK
         working-directory: android-apk
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: 读取版本号并整理产物名
         id: pack
