@@ -1,16 +1,21 @@
 package com.virmuran.imgsnag;
 
 import android.app.Activity;
-import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.MediaStore;
 import android.view.View;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -25,73 +30,120 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * 唯一的界面。它只做四件事，其余全在 Python 里：
+ * 界面外壳。真正干活的全在 Python 里，这里只做三件事：
  *
- *   1. 接收「分享」过来的文本（微信分享的是「标题 + 链接」混在一起的整段文本，
- *      不一定是干净 URL —— 抽链接是 Python 侧 extract_url 的活）
- *   2. 读剪贴板（用户复制链接后回来点按钮）
- *   3. 在后台线程调 Python 抓图，把日志贴到屏幕上
- *   4. 把 Python 下好的图片交给 {@link Gallery} 写进系统相册
+ *   1. 启动 Python 侧的本地服务（{@code imgsnag_web.start}），拿回端口号；
+ *   2. 用一个 WebView 加载 {@code http://127.0.0.1:<端口>/} ——
+ *      网格、大图预览、历史页都在那个网页里；
+ *   3. 把「微信分享过来的文本」转交给界面（{@code imgsnag_web.push_share}）。
  *
- * ── 为什么第 3 步和第 4 步都必须在后台线程 ──
- * 抓一篇文章要下载几十张原图，几十秒很正常。放在主线程会直接把界面卡死，
- * 安卓在 5 秒无响应时还会弹「应用无响应」（ANR）让用户选择杀掉它。
- * 所以这里从线程到 UI 的每一处回写都走 Handler。
+ * ── 为什么这套东西跑在本机的一个端口上 ──
+ * 页面与接口**同源**：不需要处理跨域，也不需要写 JS↔Java 的桥。
+ * 服务只绑 127.0.0.1，同一 Wi-Fi 下的别的设备连不上；
+ * 清单里也只给这一条回环地址放行明文 HTTP（见 res/xml/network_security_config.xml）。
  *
- * ── Python 运行时在主线程启动，抓取在后台线程 ──
- * 启动 Python 是一次性的初始化（Chaquopy 要先把它打包进去的运行时准备好），
- * 放在 onCreate 里最稳 —— 官方文档与 demo 都这么写。我本来放到后台线程去了
- * （体感也许更好），但那条路没人验证过，而这个 App 我没法在真机上试，
- * 不值得为一次性的几十毫秒去冒险。
- * 真正耗时的网络抓取则一律在后台线程：那是几十秒的活，放主线程会直接 ANR。
+ * ── 为什么还留着一条「不走网页」的老路 ──
+ * 网页这条路多了一个前提：手机允许 App 连自己的回环地址。这一条我**没法在本机验证**，
+ * 只能等真机。所以兜底留着：读剪贴板 → 直接调 {@code snag_text} 抓图 → 搬进相册。
+ * 万一网页起不来（白屏），App 至少还能用，而且日志里会写清楚它为什么没起来。
+ *
+ * ── 线程 ──
+ * 启动 Python、起服务都在后台线程（Python 运行时的初始化 + 建监听套接字，几十到几百毫秒，
+ * 放主线程是没必要的 ANR 风险）；所有 UI 回写一律走 Handler。
+ * 抓图那种几十秒的活更是只能在后台线程 —— 主线程超过 5 秒无响应就会弹「应用无响应」。
  */
 public class MainActivity extends Activity {
 
-    /** Python 侧约定的中转目录名。抓好的图先落这里，再由 Java 搬进相册。 */
+    /** Python 侧约定的中转目录名。兜底抓图时图先落这里，再由 Java 搬进相册。 */
     private static final String PENDING_DIR = "pending";
 
+    /** 本地服务的地址头。端口由 Python 侧随机分配（避免撞上别的 App 占用的端口）。 */
+    private static final String LOOPBACK = "http://127.0.0.1:";
+
+    /** 等网页起来的上限。超过就认定失败并把兜底按钮亮出来。 */
+    private static final int BOOT_TIMEOUT_MS = 15000;
+
+    private WebView web;
+    private View splash;
+    private ProgressBar spinner;
+    private TextView statusView;
     private TextView logView;
     private ScrollView scroller;
+
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    /** 同一时间只允许一次抓取 —— 连点两次会开两条线程抢同一个中转目录。 */
+    /** Python 里的 imgsnag_web 模块。 */
+    private PyObject webMod;
+
+    /** 本地服务端口；0 表示还没起来。 */
+    private volatile int port = 0;
+
+    /** 服务是否已就绪。 */
+    private volatile boolean served = false;
+
+    /** 服务没起来时，先把分享内容存这儿；起来并加载完页面后再交出去。 */
+    private volatile String pendingShare = null;
+
+    /** 网页是否已经露面（用过它就能判断该不该再显示遮罩）。 */
+    private boolean webShown = false;
+
+    /** 兜底抓取的重入守卫：连点两次会开两条线程抢同一个中转目录。 */
     private volatile boolean running = false;
+
+    /** 网页迟迟不来时的看门狗。 */
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!webShown) {
+                webFailed("等了 " + (BOOT_TIMEOUT_MS / 1000) + " 秒还没起来");
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        web = findViewById(R.id.web);
+        splash = findViewById(R.id.splash);
+        spinner = findViewById(R.id.spin);
+        statusView = findViewById(R.id.status);
         logView = findViewById(R.id.log);
         scroller = findViewById(R.id.scroll);
 
-        // 在这里（主线程）启动 Python —— 照 Chaquopy 文档与官方 demo 的写法。
-        // 用 ApplicationContext 而不是 this：Python 运行时活得比 Activity 久，
-        // 拿 Activity 当上下文会把它一起钉住（经典的内存泄漏）。
+        // Python 运行时在主线程启动 —— Chaquopy 官方文档与 demo 都这么写。
+        // 用 ApplicationContext 而不是 this：运行时活得比 Activity 久，
+        // 拿 Activity 当上下文会把整棵树钉住（经典的内存泄漏）。
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(getApplicationContext()));
         }
+        webMod = Python.getInstance().getModule("imgsnag_web");
 
-        findViewById(R.id.btn_clip).setOnClickListener(new View.OnClickListener() {
+        setupWebView();
+
+        findViewById(R.id.retry).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                fromClipboard();
+                bootWeb();
             }
         });
-        findViewById(R.id.btn_gallery).setOnClickListener(new View.OnClickListener() {
+        findViewById(R.id.fallback).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                openGallery();
+                fallbackFromClipboard();
             }
         });
 
-        // 从「分享」进来时，intent 里就带着链接，直接开跑
+        bootWeb();
+
+        // 从「分享」进来时，intent 里就带着链接
         handleIntent(getIntent());
     }
 
     /**
-     * 应用已经在后台时再从别处分享过来，不会走 onCreate 而是走这里。
-     * 不重写它的话表现是「第一次分享能抓，第二次点分享没反应」。
+     * 应用已在后台时再从别处分享过来，走的是这里而不是 onCreate。
+     * 不重写它的表现是「第一次分享能抓，第二次点分享没反应」。
      */
     @Override
     protected void onNewIntent(Intent intent) {
@@ -100,7 +152,128 @@ public class MainActivity extends Activity {
         handleIntent(intent);
     }
 
-    // ──────────────────────────── 输入 ────────────────────────────
+    // ──────────────────────────── 网页 ────────────────────────────
+
+    private void setupWebView() {
+        WebSettings s = web.getSettings();
+        // 界面全靠 JS（轮询进度、画网格、翻大图），必须开。
+        s.setJavaScriptEnabled(true);
+        // 页面是自己发的，不需要读手机里的文件，也不需要读别的 App 的内容。
+        s.setAllowFileAccess(false);
+        s.setAllowContentAccess(false);
+        // 状态是实时轮询来的，缓存只会让人看到旧的一眼。
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                showWeb();
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest req,
+                                        WebResourceError err) {
+                // 只关心主文档的失败：某张缩略图没下下来不该把整页判死。
+                if (req != null && req.isForMainFrame()) {
+                    webFailed(String.valueOf(err == null ? "未知原因" : err.getDescription()));
+                }
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                Uri u = req == null ? null : req.getUrl();
+                // 自己的页面：留在 WebView 里。
+                if (u != null && "127.0.0.1".equals(u.getHost())) {
+                    return false;
+                }
+                // 页面里若出现外部链接，交给系统浏览器 —— 别在这个"壳"里迷路。
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, u));
+                } catch (Exception ignored) {
+                    // 没有浏览器就没有吧，不能为此崩掉
+                }
+                return true;
+            }
+        });
+    }
+
+    /** 起本地服务，好了就加载页面。失败则留在遮罩上并写清原因。 */
+    private void bootWeb() {
+        if (served) {
+            loadHome();
+            return;
+        }
+        spinner.setVisibility(View.VISIBLE);
+        statusView.setText(R.string.status_starting);
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Integer got = null;
+                Throwable err = null;
+                try {
+                    // ctx 传 Application 上下文 —— Python 侧要拿它调 Gallery 写相册。
+                    Context app = getApplicationContext();
+                    PyObject out = webMod.callAttr("start", app, BuildConfig.VERSION_NAME);
+                    got = out == null ? 0 : out.toInt();
+                } catch (Throwable t) {
+                    // 必须兜 Throwable：Python 侧的语法/导入错误由 Chaquopy 以
+                    // Error 的子类抛出，只 catch Exception 会让线程静默死掉，
+                    // 用户看到的就是「点了没反应」——最难查的那种症状。
+                    err = t;
+                }
+                final Integer fPort = got;
+                final Throwable fErr = err;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (fErr != null) {
+                            webFailed(String.valueOf(fErr));
+                            return;
+                        }
+                        port = fPort == null ? 0 : fPort;
+                        if (port <= 0) {
+                            webFailed("服务没有返回端口");
+                            return;
+                        }
+                        served = true;
+                        loadHome();
+                    }
+                });
+            }
+        }, "imgsnag-web").start();
+    }
+
+    private void loadHome() {
+        ui.removeCallbacks(watchdog);
+        ui.postDelayed(watchdog, BOOT_TIMEOUT_MS);
+        web.loadUrl(LOOPBACK + port + "/");
+    }
+
+    /** 网页露出来了：收起遮罩，并把攒着的分享内容交出去。 */
+    private void showWeb() {
+        ui.removeCallbacks(watchdog);
+        if (!webShown) {
+            webShown = true;
+            web.setVisibility(View.VISIBLE);
+            splash.setVisibility(View.GONE);
+            log("网页界面已就绪");
+        }
+        deliverShare();
+    }
+
+    /** 网页没起来：留在遮罩上，写明原因，把两个按钮亮出来给用户选。 */
+    private void webFailed(String why) {
+        if (webShown) {
+            // 已经看到网页了，别再盖回去
+            return;
+        }
+        spinner.setVisibility(View.GONE);
+        statusView.setText(R.string.status_failed);
+        log("❌ 界面没能启动：" + why);
+    }
+
+    // ────────────────────────── 分享与输入 ──────────────────────────
 
     private void handleIntent(Intent intent) {
         if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) {
@@ -108,18 +281,41 @@ public class MainActivity extends Activity {
         }
         CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
         if (text == null) {
-            CharSequence subject = intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT);
-            text = subject;
+            // 有些 App 把内容塞在 SUBJECT 里
+            text = intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT);
         }
         if (text == null || text.toString().trim().isEmpty()) {
-            log("分享过来的内容是空的（可以试试先复制链接，再用左边按钮）");
+            log("分享过来的内容是空的（可以先复制链接，再回来点「直接抓取」）");
             return;
         }
         log("收到分享内容");
-        start(text.toString());
+        queueShare(text.toString());
     }
 
-    private void fromClipboard() {
+    /** 先把内容存住，等网页真的露面了再交出去（没露面就交，对方收不到）。 */
+    private void queueShare(String s) {
+        pendingShare = s;
+        deliverShare();
+    }
+
+    private void deliverShare() {
+        String share = pendingShare;
+        if (share == null || webMod == null || !served || !webShown) {
+            return;
+        }
+        try {
+            // 只投递、不解析：页面可能正忙着看上一篇文章，
+            // 什么时候开始由界面决定（Python 侧还会再等页面来取）。
+            webMod.callAttr("push_share", share);
+            pendingShare = null;
+        } catch (Throwable t) {
+            log("⚠ 分享内容没能送给界面：" + t);
+        }
+    }
+
+    // ─────────────────── 兜底：不走网页，直接抓图 ───────────────────
+
+    private void fallbackFromClipboard() {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         ClipData clip = cm == null ? null : cm.getPrimaryClip();
         if (clip == null || clip.getItemCount() == 0) {
@@ -131,38 +327,29 @@ public class MainActivity extends Activity {
             toast(getString(R.string.msg_clip_empty));
             return;
         }
-        start(text.toString());
+        runFallback(text.toString());
     }
 
-    private void openGallery() {
-        try {
-            Intent i = new Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-            i.setType("image/*");
-            startActivity(i);
-        } catch (ActivityNotFoundException e) {
-            toast(getString(R.string.msg_no_gallery_app));
-        }
-    }
-
-    // ──────────────────────── 抓取（后台线程）────────────────────────
-
-    private void start(final String raw) {
+    private void runFallback(final String raw) {
         if (running) {
             toast(getString(R.string.msg_busy));
             return;
         }
         running = true;
+        spinner.setVisibility(View.VISIBLE);
+        statusView.setText(R.string.msg_started);
         log(getString(R.string.msg_started));
 
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String text = snagAndPublish(raw);
+                final String report = snagAndPublish(raw);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
                         running = false;
-                        log(text);
+                        spinner.setVisibility(View.GONE);
+                        log(report);
                     }
                 });
             }
@@ -172,10 +359,10 @@ public class MainActivity extends Activity {
     /** 全部跑在后台线程：Python 抓图 → 搬进相册。返回要显示给用户的整段文本。 */
     private String snagAndPublish(String raw) {
         Context app = getApplicationContext();
-        // Python 的约定：给它一个**根目录**，它自己在底下建 pending/<文章文件夹>/。
-        // 所以传给 Python 的是 filesDir 根（下面用 scratch），而扫描/清理用的
-        // workRoot 是它底下的 pending 那一层。
-        // 如果把 workRoot 直接传给 Python，路径会嵌成 pending/pending/…，
+        // 约定：给 Python 一个**根目录**，它自己在底下建 pending/<文章文件夹>/。
+        // 所以传给 Python 的是 filesDir 根（下面叫 scratch），
+        // 而扫描/清理用的 workRoot 是它底下的 pending 那一层。
+        // 若把 workRoot 直接传过去，路径会嵌成 pending/pending/…：
         // 扫描时内层 pending 被当成"文章文件夹"，里面全是文件夹没有图 ——
         // 表现是「共 N 张…没有新图片可入库」，两边都不报错（真机首跑踩过）。
         File scratch = app.getFilesDir();
@@ -184,8 +371,6 @@ public class MainActivity extends Activity {
         // ── ① Python 抓图 ──
         String report;
         try {
-            // onCreate 里已经启动过了；这里只是兜底（万一那边因为别的原因没成）。
-            // 不加这个判断的话，重复 Python.start 会直接崩。
             if (!Python.isStarted()) {
                 Python.start(new AndroidPlatform(app));
             }
@@ -193,9 +378,6 @@ public class MainActivity extends Activity {
             PyObject out = mod.callAttr("snag_text", raw, scratch.getAbsolutePath());
             report = out == null ? "(Python 没有返回任何内容)" : out.toString();
         } catch (Throwable t) {
-            // 这里必须兜住 Throwable 而不是 Exception：Python 侧的语法/导入错误
-            // 由 Chaquopy 以 Error 的子类抛出，只 catch Exception 会让整个后台线程静默死掉，
-            // 用户看到的就是「点了按钮没反应」——最难查的那种症状。
             report = "❌ Python 侧出错：\n" + t;
         }
 
@@ -241,7 +423,7 @@ public class MainActivity extends Activity {
             tail.append("\n⚠ 有 ").append(failed).append(" 张写相册失败：").append(firstError);
         }
 
-        // ── ③ 清掉中转目录（图片已经进相册，留着白占空间）──
+        // ── ③ 清掉中转目录（图已进相册，留着白占空间）──
         deleteTree(workRoot);
 
         return report + tail;
@@ -262,7 +444,8 @@ public class MainActivity extends Activity {
     }
 
     private void log(final String msg) {
-        String line = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()) + "  " + msg;
+        String line = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date())
+                    + "  " + msg;
         logView.append("\n" + line);
         scroller.post(new Runnable() {
             @Override

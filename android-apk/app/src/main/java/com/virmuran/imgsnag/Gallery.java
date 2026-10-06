@@ -12,6 +12,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Arrays;
 import java.util.Locale;
 
 /**
@@ -31,10 +32,18 @@ import java.util.Locale;
  * ── 为什么这段逻辑在 Java 而不是 Python ──
  * Python 那边（web_image_dl/）的定位是"零 Qt、零第三方依赖的纯逻辑"，
  * 换到任何平台都能跑。碰安卓系统 API 是平台特有的事，所以留在这层。
+ *
+ * ── 与 Python 的握手 ──
+ * {@link #publishDir} 是 Python 唯一会调用的入口：Python 用全限定类名
+ * `com.virmuran.imgsnag.Gallery` 找过来，按 (上下文, 目录, 相册子目录) 传参，
+ * 拿回成功张数。**改签名/改名字会让两边对不上**，而症状是
+ * 「图抓到了但相册里没有、两边都不报错」（本项目真机上踩过一次），
+ * 所以测试把类名、方法名、参数顺序、相册目录名逐条钉住了。
  */
 public final class Gallery {
 
-    /** 相册里的相册名（Pictures 下的子目录） */
+    /** 相册里的相册名（Pictures 下的子目录）。
+     *  ⚠ Python 侧（imgsnag_web.ALBUM_SUBDIR）必须与此一致，测试盯着。 */
     public static final String ALBUM = "ImgSnagWeChat";
 
     private Gallery() {
@@ -107,5 +116,48 @@ public final class Gallery {
         done.put(MediaStore.MediaColumns.IS_PENDING, 0);
         cr.update(uri, done, null, null);
         return uri;
+    }
+
+    /**
+     * 把一个目录里的图片**全部**登记进相册，返回成功张数。
+     *
+     * 这是与 Python 的握手点：`imgsnag_web._java_publish` 按
+     * `(上下文, 目录, 相册子目录)` 调它。参数顺序与名字都被测试钉住。
+     *
+     * 单张失败不中断其余 —— 记下最后一个错误，只有"一张都没成"才抛出来。
+     * 这样一张坏图不至于让整篇文章白抓，而部分成功时 Python 会把这次记成
+     * 「部分成功」，用户回头能看出哪次没拿全。
+     */
+    public static int publishDir(Context ctx, String srcDir, String albumSub) throws IOException {
+        File[] files = new File(srcDir).listFiles();
+        if (files == null) {
+            throw new IOException("读不到待入库的目录：" + srcDir);
+        }
+        // 排序只是为了让相册里的顺序与 img_01、img_02… 一致（File 按路径排）
+        Arrays.sort(files);
+
+        int ok = 0;
+        IOException lastError = null;
+        for (File f : files) {
+            if (!f.isFile()) {
+                continue;
+            }
+            String name = f.getName();
+            // 半截文件不入库：Python 侧是"先写 .part 再改名"，正常情况下见不到，
+            // 但真见到时宁可不收，也不能往相册塞一张打不开的图。
+            if (name.endsWith(".part") || name.startsWith(".")) {
+                continue;
+            }
+            try {
+                publish(ctx, f, albumSub, name);
+                ok++;
+            } catch (IOException e) {
+                lastError = e;
+            }
+        }
+        if (ok == 0 && lastError != null) {
+            throw lastError;
+        }
+        return ok;
     }
 }

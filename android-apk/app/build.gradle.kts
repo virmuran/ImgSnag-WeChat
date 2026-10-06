@@ -87,6 +87,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildFeatures {
+        // 界面外壳要用 BuildConfig.VERSION_NAME 把版本号传给 Python 侧
+        // （网页底部那行版本号就是它）。AGP 8 起默认不生成 BuildConfig，
+        // 不显式打开的话编译直接报 "找不到符号 BuildConfig"。
+        buildConfig = true
+    }
+
     lint {
         // 静态检查只提示、不阻断构建：这是自用工具，不追求上架规范
         abortOnError = false

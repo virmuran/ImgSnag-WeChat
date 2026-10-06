@@ -24,7 +24,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))       # tools/
 ROOT = os.path.dirname(HERE)                       # 项目根
-TEST = os.path.join(ROOT, 'tests', 'test_apk_app.py')
+TEST_APP = os.path.join(ROOT, 'tests', 'test_apk_app.py')   # 桥接层 + 工程静态契约
+TEST_WEB = os.path.join(ROOT, 'tests', 'test_apk_web.py')   # 网页界面后端（真起本地服务）
 LOG = os.path.join(ROOT, '_rv_apk_log.txt')
 
 MANIFEST = 'android-apk/app/src/main/AndroidManifest.xml'
@@ -36,8 +37,11 @@ GAL_JAVA = 'android-apk/app/src/main/java/com/virmuran/imgsnag/Gallery.java'
 APP_GRADLE = 'android-apk/app/build.gradle.kts'
 APK_README = 'android-apk/README.md'
 SYNCED = 'android-apk/app/src/main/python/web_image_dl/naming.py'
+WEB_PY = 'android-apk/app/src/main/python/imgsnag_web.py'
+WEBUI = 'android-apk/app/src/main/python/webui.py'
+HIST_MGR = 'web_image_dl/history_manager.py'
 
-#: (说明, 文件, 原文, 替换为, 预期变红的用例)
+#: (说明, 文件, 原文, 替换为, 预期变红的用例, 跑哪个测试文件)
 CASES = [
     ('清单里去掉联网权限', MANIFEST,
      '    <uses-permission android:name="android.permission.INTERNET"/>\n', '',
@@ -89,7 +93,64 @@ CASES = [
     ('副本漂移（改了同步过来的文件）', SYNCED,
      'MAX_TITLE_LEN = 24', 'MAX_TITLE_LEN = 25',
      '[8] 没有内容漂移'),
+
+    # ── 网页界面这一层（跑 test_apk_web.py）────────────────────────────
+    # 层的价值在于"它在电脑上就能验"，所以这些断言必须是**真的** ——
+    # 否则这一层又变成"只能真机发现"，白折腾一场。
+    ('网页里少一个 JS 要找的元素（点了没反应）', WEBUI,
+     '<div id="grid"></div>', '<div id="gridx"></div>',
+     "[9] JS 引用的 id 都存在（缺：['grid']）", TEST_WEB),
+    ('页面被当成格式化字符串发出去（CSS 里的 {} 会被吃掉）', WEB_PY,
+     "webui.PAGE.encode('utf-8')", "webui.PAGE.format().encode('utf-8')",
+     '[9] 页面原样发送', TEST_WEB),
+    # 下面两条的最后一个 **-1** 表示「替换**所有**命中」（页面里接口名各出现两次）。
+    # ⚠ 别写 0：`str.replace(old, new, 0)` 是"替换 0 次"，跟 `re.sub` 的 count=0
+    #   （=全部）**正好相反** —— 写错的表现是"拆坏没发生"，然后脚本报
+    #   "断言是假的"，把工具自己的 bug 赖到断言头上（这一条真踩过）。
+    # 只换一处会照绿 —— 那不是断言假，是拆坏拆得不到位，两件事得分清楚。
+    ('页面把保存接口写错', WEBUI,
+     "'/api/save'", "'/api/saveX'", '[9] 有保存到相册的动作', TEST_WEB, -1),
+    ('页面把图片接口写错', WEBUI,
+     "'/img/'", "'/imgx/'", '[9] 图片走本地接口', TEST_WEB, -1),
+    ('Java 投递分享时改了方法名', MAIN_JAVA,
+     'webMod.callAttr("push_share", share)', 'webMod.callAttr("push_sharex", share)',
+     '[10] Java 调的确实是 push_share', TEST_WEB),
+    ('Java 忘了把版本号传给 Python', MAIN_JAVA,
+     'webMod.callAttr("start", app, BuildConfig.VERSION_NAME)',
+     'webMod.callAttr("start", app)',
+     '[10] Java 把版本号一起传了进去', TEST_WEB),
+    ('Python 侧换了相册目录名', WEB_PY,
+     'ALBUM_SUBDIR = imgsnag.DEFAULT_SUBDIR', "ALBUM_SUBDIR = 'Snagged'",
+     '[10] 相册目录名 Java 与 Python 一致', TEST_WEB),
+    ('清单里去掉回环明文放行（真机白屏）', MANIFEST,
+     '        android:networkSecurityConfig="@xml/network_security_config"\n', '',
+     '[10] 清单里指向了网络安全配置', TEST_WEB),
+    ('Java 侧改了入库方法名', GAL_JAVA,
+     'public static int publishDir(', 'public static int publishDirX(',
+     '[10] Java 提供 public static int publishDir(...)', TEST_WEB),
+    ('轮询时把分享内容消费掉（页面正忙就丢分享）', WEB_PY,
+     "                    st['share'] = engine.pending_share\n",
+     "                    st['share'] = engine.pending_share\n"
+     "                    engine.pending_share = ''\n",
+     '[3] **没被消费掉**', TEST_WEB),
+    ('history 模块导入时就建库（会往用户主目录写东西）', HIST_MGR,
+     '_INSTANCE = None', '_INSTANCE = HistoryManager()',
+     '[11] 导入时不建库', TEST_WEB),
 ]
+
+#: 老用例不写"跑哪个测试文件"就默认跑 test_apk_app.py —— 免得为了加个字段
+#: 把上面十几条全部改一遍（改错一条锚点就失效，脚本会报"锚点找不到"）。
+#: 第 7 项是替换次数，不写就是 1（只换第一处）；**-1 = 全部替换**
+#: （注意 `str.replace` 的 0 是"一次都不换"，与 `re.sub` 相反）。
+def cases():
+    out = []
+    for c in CASES:
+        desc, rel, old, new, expect = c[:5]
+        out.append((desc, rel, old, new, expect,
+                    c[5] if len(c) > 5 else TEST_APP,
+                    c[6] if len(c) > 6 else 1))
+    return out
+
 
 
 def bak(p):
@@ -108,7 +169,7 @@ def bak(p):
 def restore_all(verbose=True):
     """把上一轮留下的 .rvbak 全部还原（中途被掐断时的救命手段）。"""
     n = 0
-    for _desc, rel, _old, _new, _expect in CASES:
+    for _desc, rel, _old, _new, _expect, _test, _limit in cases():
         p = os.path.join(ROOT, rel)
         if os.path.exists(bak(p)):
             shutil.copyfile(bak(p), p)
@@ -119,11 +180,11 @@ def restore_all(verbose=True):
     return n
 
 
-def run_test():
+def run_test(test):
     env = dict(os.environ)
     env['PYTHONIOENCODING'] = 'utf-8'
     try:
-        r = subprocess.run([sys.executable, TEST], cwd=ROOT, env=env,
+        r = subprocess.run([sys.executable, test], cwd=ROOT, env=env,
                            capture_output=True, timeout=150)
         return r.returncode, (r.stdout + r.stderr).decode('utf-8', 'replace')
     except subprocess.TimeoutExpired:
@@ -142,15 +203,19 @@ def main():
     if left:
         say(f'（启动时还原了 {left} 处上一轮的残留）')
 
-    rc, _ = run_test()
-    say(f'基线：未拆坏时 rc={rc}  {"✅" if rc == 0 else "❌ 基线就不绿，先修它"}')
-    if rc != 0:
+    baseline_ok = True
+    for name, test in (('工程契约', TEST_APP), ('网页界面', TEST_WEB)):
+        rc, _ = run_test(test)
+        say(f'基线（{name}，未拆坏）rc={rc}  {"✅" if rc == 0 else "❌ 基线就不绿，先修它"}')
+        if rc != 0:
+            baseline_ok = False
+    if not baseline_ok:
         say('基线不绿，后面的结论没意义，终止。')
         open(LOG, 'w', encoding='utf-8').write('\n'.join(out))
         return 1
 
     bad = []
-    for i, (desc, rel, old, new, expect) in enumerate(CASES, 1):
+    for i, (desc, rel, old, new, expect, test, limit) in enumerate(cases(), 1):
         path = os.path.join(ROOT, rel)
         text = open(path, encoding='utf-8').read()
         if old not in text:
@@ -161,9 +226,9 @@ def main():
         os.makedirs(os.path.dirname(bak(path)), exist_ok=True)
         shutil.copyfile(path, bak(path))          # ← 先备份，再改
         with open(path, 'w', encoding='utf-8') as f:
-            f.write(text.replace(old, new, 1))    # 显式关闭：别指望 GC 帮你 flush
+            f.write(text.replace(old, new, limit))   # 显式关闭：别指望 GC 帮你 flush
         try:
-            rc, log = run_test()
+            rc, log = run_test(test)
         finally:
             shutil.copyfile(bak(path), path)      # ← 立刻还原
             os.remove(bak(path))
@@ -176,7 +241,8 @@ def main():
             # 变红了只是必要条件。还要看**红的是不是那条断言** ——
             # 所以这里把失败行原样打出来供核对（段号不在 ✗ 行里，不自动匹配，
             # 免得又写出一条"看起来在验证、其实没验证"的检查）。
-            say(f'{i:>2}. ✅ 拆坏「{desc}」→ 变红（{len(hit)} 项失败）')
+            say(f'{i:>2}. ✅ 拆坏「{desc}」→ 变红（{os.path.basename(test)}，'
+                f'{len(hit)} 项失败）')
             say(f'        期望命中：{expect}')
             for ln in hit[:3]:
                 say(f'          {ln}')

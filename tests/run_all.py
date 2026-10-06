@@ -41,6 +41,7 @@ DEFAULT_FILES = [
     'test_history.py',         # 下载历史：重新解析不抹掉下载记录（纯逻辑，临时 db）
     'test_imgsnag.py',         # 手机版（Termux）：副本同步校验 + 整链路（假网络）
     'test_apk_app.py',         # 安卓 APK：桥接层整链路 + 工程静态契约（不依赖 Qt）
+    'test_apk_web.py',         # 安卓 APK：网页界面后端（真起本地服务 + 假网络/假相册）
     'test_tray.py',            # 托盘与关闭窗口行为（离屏）
     'test_ui_smoke.py',        # 界面回归（离屏）
 ]

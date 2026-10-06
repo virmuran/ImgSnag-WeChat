@@ -36,10 +36,10 @@ APK 版必须有自己的副本，理由和 Termux 版不同：Chaquopy 是从
 为什么只拷这几个文件
 ────────────────────────────────────────────────────────────────────────
 判据是「**手机端跑得动吗**」：这些都是零 Qt、零第三方依赖
-（只用 re / os / datetime / urllib 这些标准库），拿过去就能跑。
+（只用 re / os / datetime / sqlite3 / urllib 这些标准库），拿过去就能跑。
 其余模块要么依赖 PySide6（app/widgets/save_worker/settings），
-要么是桌面端专有的运行时数据管理（history_manager/blocked_config/library/
-file_utils），手机端不需要也不该有。
+要么是桌面端专有的运行时数据管理（blocked_config/library/file_utils），
+手机端不需要也不该有。
 
 顺带一个好处：零依赖 = APK 里不用装任何 pip 包。
 Chaquopy 装包要走它自己的仓库、还得为 arm64 现编，是构建最容易失败的环节；
@@ -73,6 +73,10 @@ FILES = {
     '__init__.py':      '包标识（只有版本号，无依赖）',
     'extractor.py':     '通用 URL 清洗（洗转义残留 / 补协议），各站点共用',
     'naming.py':        '下载文件夹命名与非法字符清洗',
+    # 网页版界面要从历史里"再打开一次"，所以手机端也需要它。
+    # 纯 stdlib（sqlite3），而且**导入无副作用**（单例是惰性的），
+    # 手机端会把库建在应用私有目录里（见 imgsnag_web.py 的 root 参数）。
+    'history_manager.py': '下载历史（SQLite），手机端建在应用目录里',
     'sites/__init__.py': '适配器注册表（决定"认不认识这个链接"）',
     'sites/base.py':    '适配器接口与通用扩展名推断',
     'sites/weixin.py':  '微信公众号全部站点知识（原图档 / 去水印 / 正文顺序）',

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  这份配置只为了一件事：**允许访问本机回环地址的明文 HTTP**。
+
+  界面是网页，页面与接口都由应用自己在手机本机起的服务提供，地址形如
+  http://127.0.0.1:<端口>/。安卓从 9 起默认禁止明文 HTTP，回环地址也算 ——
+  不放行的话 WebView 会直接白屏（控制台里是 ERR_CLEARTEXT_NOT_PERMITTED）。
+
+  ⚠ 只放行 127.0.0.1 这一个域，**没有**动 base-config：
+  抓图走的 https://mp.weixin.qq.com 不受影响，将来也不会因为"顺手写了个 http
+  地址"就悄悄以明文发出去。真机上万一这条不生效（表现为白屏），退路是把它换成
+  <base-config cleartextTrafficPermitted="true"> —— 那是全局开口子，能不用就不用。
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

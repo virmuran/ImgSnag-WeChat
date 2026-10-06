@@ -1,69 +1,99 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  界面。只有三样东西：一句说明、两个按钮、一块日志。
+  界面：一个网页 + 一层「启动 / 出错」遮罩。
 
-  为什么做得这么素：这个 App 的界面**不是卖点**，抓取逻辑才是。
-  每加一个控件就多一处只在真机上才暴露的坑（触摸目标太小、深色模式看不清、
-  小屏挤成两行…），而我在这里没法跑模拟器验证。宁可少，宁可一眼看懂。
+  ── 为什么界面是个网页 ──
+  图片网格、点开看大图、双指缩放，这三样浏览器天生就有；用安卓控件从头做
+  至少要几百行，而且**我在这里没法跑模拟器，一行都验不了**。
+  换成网页之后：抓取逻辑跑在本地 Python 服务上（只绑 127.0.0.1），
+  页面在电脑上就能打开、能点、能截图 —— 把「只能真机验」的部分压到最小。
 
-  日志用 ScrollView + 等宽字体，是因为出错时用户需要把整段文字复制发出来 ——
-  textIsSelectable 就是为这个开的。
+  ── 遮罩（splash）是干什么的 ──
+  服务起来要几百毫秒，加载页面还要一会儿。这段时间不能白屏（白屏没法排查），
+  所以先显示状态文字与日志。**只有两种情况会一直留在遮罩上**：
+  服务起不来、页面加载失败 —— 这时给两个按钮：
+    「重试」     再起一次服务
+    「直接抓取」 不走网页，读剪贴板 → 抓图 → 直接进相册（兜底，保证 App 还能用）
+
+  ── 日志为什么要能选中 ──
+  出错时用户需要把整段文字复制发出来。textIsSelectable 就是为这个开的。
 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:fitsSystemWindows="true"
-    android:padding="12dp">
+    android:background="@color/log_bg">
 
-    <TextView
-        android:id="@+id/hint"
+    <!-- 网页界面。加载完成之前不显示（显示的是下面那层遮罩）。 -->
+    <WebView
+        android:id="@+id/web"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/hint"
-        android:textSize="13sp"
-        android:textColor="@color/hint"/>
+        android:layout_height="match_parent"
+        android:visibility="invisible"/>
 
     <LinearLayout
+        android:id="@+id/splash"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginTop="10dp">
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        android:padding="20dp">
 
-        <Button
-            android:id="@+id/btn_clip"
-            android:layout_width="0dp"
+        <ProgressBar
+            android:id="@+id/spin"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/btn_clip"/>
-
-        <Button
-            android:id="@+id/btn_gallery"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:text="@string/btn_gallery"/>
-    </LinearLayout>
-
-    <ScrollView
-        android:id="@+id/scroll"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="10dp"
-        android:padding="8dp"
-        android:background="@color/log_bg">
+            android:layout_marginTop="72dp"/>
 
         <TextView
-            android:id="@+id/log"
+            android:id="@+id/status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/log_init"
-            android:textSize="12sp"
-            android:typeface="monospace"
-            android:textColor="@color/log_fg"
-            android:textIsSelectable="true"/>
-    </ScrollView>
+            android:layout_marginTop="18dp"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:text="@string/status_starting"
+            android:textSize="14sp"
+            android:textColor="@color/hint"/>
 
-</LinearLayout>
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="18dp">
+
+            <Button
+                android:id="@+id/retry"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_retry"/>
+
+            <Button
+                android:id="@+id/fallback"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="@string/btn_fallback"/>
+        </LinearLayout>
+
+        <ScrollView
+            android:id="@+id/scroll"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="18dp"
+            android:padding="10dp">
+
+            <TextView
+                android:id="@+id/log"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/log_init"
+                android:textSize="12sp"
+                android:typeface="monospace"
+                android:textColor="@color/log_fg"
+                android:textIsSelectable="true"/>
+        </ScrollView>
+
+    </LinearLayout>
+
+</FrameLayout>
