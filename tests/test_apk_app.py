@@ -487,6 +487,7 @@ def test_workflow():
     check('keytool -list' in wf, '构建前先验一次签名密钥能否被 JDK 读取')
     check('libpython3' in wf, '验包会检查 libpython 是否真的进了包')
     check('unzip -l' in wf, '验包看的是包内实际内容')
+    check('dump badging' in wf, '图标/包名用 aapt2 badging 判定（不按 res 文件名找，路径会被优化掉）')
     check('test_apk_app.py' in wf, '打包前先跑本文件的快速自检')
 
     # 触发的路径要覆盖会影响 APK 的一切

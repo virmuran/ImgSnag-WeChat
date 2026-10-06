@@ -128,12 +128,17 @@ jobs:
       # 就用能机器判定的方式确认关键东西真的进了包：
       #   ① 签名有效（无效的 APK 手机根本装不上）
       #   ② Python 运行时在（缺了会一打开就闪退，而且体积上看不出来）
-      #   ③ 我们自己的代码在（同步漏了会表现成"抓不到图"）
+      #   ③ 清单/版本/图标 —— 用 aapt2 badging 判定。
+      #     ⚠ 不能按 res 文件名找图标：release 构建会优化资源路径，
+      #     "unzip 列表里有没有 ic_launcher"不可靠（实测 0 命中，其实图标好好的）。
       - name: 验包（签名 + 运行时 + 代码）
         run: |
           set -u
           APK="${{ steps.pack.outputs.apk }}"
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort | tail -1)
+          APKSIGNER="$BT/apksigner"
+          AAPT2="$BT/aapt2"
+
           echo "=== ① 签名 ==="
           "$APKSIGNER" verify --print-certs "$APK"
 
@@ -142,15 +147,22 @@ jobs:
           ARMV8=$(grep -c "lib/arm64-v8a/" /tmp/contents.txt || true)
           PYLIB=$(grep -c "libpython3" /tmp/contents.txt || true)
           CHQ=$(grep -c "assets/chaquopy/" /tmp/contents.txt || true)
-          ICON=$(grep -c "ic_launcher" /tmp/contents.txt || true)
-          echo "arm64 原生库 $ARMV8 个 / libpython $PYLIB 个 / chaquopy 资源 $CHQ 条 / 图标 $ICON 条"
+          echo "arm64 原生库 $ARMV8 个 / libpython $PYLIB 个 / chaquopy 资源 $CHQ 条"
           grep -E "libpython3|imgsnag" /tmp/contents.txt | head -10 || true
 
+          echo "=== ③ 清单与图标 ==="
+          "$AAPT2" dump badging "$APK" > /tmp/badging.txt
+          grep -E "^package:|application-label:|sdkVersion|targetSdkVersion" /tmp/badging.txt
+          ICON=$(grep -c "application-icon" /tmp/badging.txt || true)
+          echo "图标档位数 $ICON"
+
           fail=0
-          [ "$ARMV8" -gt 0 ]  || { echo "::error::APK 里没有 arm64 原生库"; fail=1; }
-          [ "$PYLIB" -gt 0 ]  || { echo "::error::APK 里没有 libpython —— Chaquopy 没生效，装上也打不开"; fail=1; }
-          [ "$CHQ"  -gt 0 ]   || { echo "::error::APK 里没有 chaquopy 资源目录"; fail=1; }
-          [ "$ICON" -gt 0 ]   || { echo "::error::APK 里没有启动图标"; fail=1; }
+          [ "$ARMV8" -gt 0 ] || { echo "::error::APK 里没有 arm64 原生库"; fail=1; }
+          [ "$PYLIB" -gt 0 ] || { echo "::error::APK 里没有 libpython —— Chaquopy 没生效，装上也打不开"; fail=1; }
+          [ "$CHQ"  -gt 0 ]  || { echo "::error::APK 里没有 chaquopy 资源目录"; fail=1; }
+          [ "$ICON" -gt 0 ]  || { echo "::error::APK 里没有启动图标"; fail=1; }
+          grep -q "^package: name='com.virmuran.imgsnag'" /tmp/badging.txt \
+            || { echo "::error::包名不是 com.virmuran.imgsnag"; fail=1; }
           exit $fail
 
       - name: 上传构建产物
