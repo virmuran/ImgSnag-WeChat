@@ -22,6 +22,18 @@ build/
 dist/
 installer/
 
+# ── 安卓构建 ──
+# 注意 `build/` 已经在上面忽略掉了，这里补的是 Gradle 自己的缓存与
+# 本机 SDK 路径（local.properties 带着写它的那台机器的绝对路径，
+# 提交上去会让别人/云端构建读到不存在的目录）
+.gradle/
+local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+captures/
+
 # ── 可执行文件与安装包 ──
 *.exe
 *.msi
@@ -58,6 +70,7 @@ desktop.ini
 max_q.txt
 _ui_shots/
 tests/_last_run.txt
+_rv_backup/
 
 # ── 发版说明草稿（一次性产物，只用来粘进 GitHub Releases 正文；
 #    版本记录的唯一来源是 version.py 与 Releases 页）──

@@ -1,0 +1,36 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# ============================================================================
+#  ImgSnag —— 「分享 → Termux」入口
+#
+#  这个文件名是 Termux 的约定：当你在别的 App 里选择「分享 → Termux」，
+#  Termux 会自动执行 ~/bin/termux-url-opener，并把分享内容作为第一个参数传进来。
+#  也就是说，装好它之后微信分享菜单里就有 ImgSnag 了。
+#
+#  自己不用改这个文件，安装脚本会把它放到正确位置。
+# ============================================================================
+APP_DIR="$HOME/imgsnag"
+IMGSNAG="$APP_DIR/imgsnag.py"
+
+target="$1"
+
+# 有些 App 分享过来的是纯文字（只有标题没有链接），这时退一步读剪贴板
+# —— 需要装 Termux:API，没装就跳过
+if [ -z "$target" ] && command -v termux-clipboard-get >/dev/null 2>&1; then
+    target="$(termux-clipboard-get)"
+fi
+
+if [ ! -f "$IMGSNAG" ]; then
+    echo "ImgSnag 还没安装完整（找不到 $IMGSNAG）"
+    echo "请在 Termux 里运行：bash android/install.sh"
+    exit 1
+fi
+
+if [ -z "$target" ]; then
+    echo "ImgSnag: 没拿到链接。"
+    echo "可以复制文章链接后再试一次，或直接在 Termux 里运行：imgsnag <链接>"
+    exit 1
+fi
+
+echo "ImgSnag: 收到分享内容"
+# 整段分享文本直接交给主程序 —— 它会自己从中抠出链接（见 imgsnag.extract_url）
+exec python "$IMGSNAG" "$target"

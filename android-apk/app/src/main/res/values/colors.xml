@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  固定用浅色，不跟系统深色模式走。
+
+  这是刻意的：深色模式切换会让布局用不同的度量（状态栏、导航栏高度都变），
+  而我没法在这里跑模拟器看效果。与其做两套没验证过的配色，
+  不如固定一套已经能看清的 —— App 主题也锁的是 Theme.Material.Light。
+-->
+<resources>
+    <color name="hint">#666666</color>
+    <color name="log_bg">#F4F4F4</color>
+    <color name="log_fg">#1A1A1A</color>
+</resources>

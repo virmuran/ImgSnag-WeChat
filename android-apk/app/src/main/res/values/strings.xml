@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ImgSnag</string>
+
+    <string name="hint">在微信里打开文章 → 右上角 … → 分享 → ImgSnag。\n也可以复制链接后，回来点左边的按钮。</string>
+
+    <string name="btn_clip">抓剪贴板链接</string>
+    <string name="btn_gallery">打开相册</string>
+
+    <string name="log_init">准备就绪。\n\n图片会存到相册的 Pictures/ImgSnagWeChat/ 下，一篇一个文件夹，按「日期_标题」命名。</string>
+    <string name="msg_clip_empty">剪贴板里没有内容</string>
+    <string name="msg_busy">上一次还在跑，等它跑完再试</string>
+    <string name="msg_started">开始处理…</string>
+    <string name="msg_no_gallery_app">手机上没找到能打开相册的应用</string>
+    <string name="msg_publish_none">没有新图片可入库</string>
+</resources>

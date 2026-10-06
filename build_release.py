@@ -119,6 +119,11 @@ def main():
     print("  · 便携包：解压即用，双击 ImgSnagWeChat.exe 直接跑，零联网")
     print("  · 用户数据（历史库/屏蔽尺寸）在用户目录，卸载不删、升级不丢")
 
+    print("\n发版说明（一份内容两处使用）:")
+    print("  · README「更新日志」的当前版本段 = GitHub Release 正文，逐字相同")
+    print("  · 格式见 RELEASE_NOTES_TEMPLATE.md；写完跑下面这条校验两处一致：")
+    print("      python tools/check_release_notes.py")
+
 
 if __name__ == "__main__":
     main()

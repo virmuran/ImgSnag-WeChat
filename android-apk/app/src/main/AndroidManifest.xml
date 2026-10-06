@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ImgSnag 安卓版清单
+
+  两个关键点：
+
+  1) INTERNET 权限 —— 抓公众号文章和图片都要联网。这是唯一需要的权限：
+     写相册走的是 MediaStore（Android 10 起应用自己新建的图片不需要任何存储权限），
+     所以没有任何 "读写手机存储" 之类的敏感权限，安装时不会吓人。
+
+  2) SEND intent-filter —— 这才是在微信里能直接分享过来的原因。
+     微信「分享」发的是纯文本（标题 + 链接），所以匹配 text/plain。
+     mimeType 写准很重要：写宽了（如 */*）会出现"分享菜单里有它但点开发不过去"。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask">
+
+            <!-- 从桌面图标启动 -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+
+            <!-- 从别处「分享」过来（微信、浏览器、笔记App…） -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

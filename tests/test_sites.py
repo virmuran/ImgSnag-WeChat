@@ -257,8 +257,22 @@ def test_weixin_adapter():
     eq(weixin.display_url('https://other.site/x'), 'https://other.site/x', '其他域名不动')
     eq(weixin.display_url(''), '', '空串安全')
 
-    eq(weixin.ext_for('https://mmbiz.qpic.cn/mmbiz_png/ID/0?wx_fmt=png'), '.png',
-       '微信 png 地址能判对扩展名')
+    # 扩展名必须从**路径段**读得出来。真实下载用的是被剥掉查询串的 `/0` 档地址，
+    # 早先这里只测了带 `?wx_fmt=png` 的那种 —— 恰好是能判对的一侧，
+    # 于是「png / gif 图被静默存成 .jpg」一直没被抓到（手机版整链路测试才发现）。
+    eq(weixin.ext_for('https://mmbiz.qpic.cn/mmbiz_png/ID/0'), '.png',
+       '剥掉查询串的原图档地址仍能判出 png')
+    eq(weixin.ext_for('https://mmbiz.qpic.cn/mmbiz_png/ID/640?wx_fmt=png'), '.png',
+       '带查询串的地址也判对')
+    eq(weixin.ext_for('https://mmbiz.qpic.cn/sz_mmbiz_gif/ID/0'), '.gif',
+       'sz_ 前缀 + gif')
+    eq(weixin.ext_for('https://mmbiz.qpic.cn/sz_mmbiz_webp/ID/0'), '.webp', 'webp')
+    eq(weixin.ext_for('https://mmbiz.qpic.cn/mmbiz_jpg/ID/0'), '.jpg', 'jpg 仍是 .jpg')
+    eq(weixin.ext_for('https://mmbiz.qpic.cn/mmbiz_jpeg/ID/0'), '.jpg',
+       'jpeg 归一成 .jpg')
+    eq(weixin.ext_for('https://example.com/a.png'), '.png',
+       '非微信地址退回通用规则')
+    eq(weixin.ext_for('https://example.com/noext'), '.jpg', '通用规则兜底')
 
 
 # ──────────────────────────────────────────────── 八、worker 的接入契约

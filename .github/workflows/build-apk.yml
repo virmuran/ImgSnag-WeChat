@@ -1,0 +1,183 @@
+# 在 GitHub 的服务器上编译安卓 APK
+#
+# ── 为什么要放云上编译，而不是本机 ──
+# 本机是 Windows，而安卓打包链是标准的 Linux 工具链：JDK + Android SDK + NDK +
+# Gradle，全下来 2GB 起步，配好还得半小时。GitHub 的 ubuntu 运行器**已经预装好了**
+# 这一整套（JDK 17、Android SDK 平台 36、build-tools 36、NDK），
+# 公开仓库还免费用、不限量。所以这里一行 apt 都不用装。
+#
+# ── 怎么用 ──
+#   自动：往 main 分支推送、且改动涉及 android-apk/ 或本文件时自动跑
+#   手动：仓库页面 → Actions → 左侧 "Build Android APK" → Run workflow
+# 跑完在 Actions 里能下 zip 产物，也会自动挂到 Releases 的 apk-latest 上。
+#
+# ── 为什么没有 gradlew ──
+# Gradle wrapper 里有个二进制 jar，塞进仓库不体面、也不透明。
+# 运行器自带 Gradle（9.x），但 Chaquopy 17.0.0 官方配套的是 Gradle 8.13，
+# 版本不对会报很难懂的错 —— 所以下面先在临时目录里生成 8.13 的 wrapper 再拷进来。
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'android-apk/**'
+      - 'web_image_dl/**'          # 站点规则改了也要重打包：副本是同步进来的
+      - 'android/sync_core.py'
+      - 'version.py'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: write                  # 需要它才能把 APK 挂到 Release
+
+# 同一分支连推两次时，把前一次还没跑完的取消掉，别白烧时间
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Chaquopy 17 要求**构建机上的 Python 主次版本与应用完全一致**（这里是 3.12），
+      # 差一个小版本就直接失败。运行器自带的 python3 恰好是 3.12，
+      # 但还是先用 setup-python 钉死，免得哪天镜像换了版本我们被动跟进。
+      - name: 装 Python 3.12（Chaquopy 打包用）
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 确认构建用的 Python 版本
+        run: |
+          python3 -V
+          if command -v python3.12 >/dev/null 2>&1; then
+            python3.12 -V
+          elif [ "$(python3 -c 'import sys;print("%d.%d" % sys.version_info[:2])')" = "3.12" ]; then
+            sudo ln -sf "$(command -v python3)" /usr/local/bin/python3.12
+            echo "已把 python3 软链为 python3.12"
+          else
+            echo "::error::构建机上没有 Python 3.12 —— Chaquopy 要求构建 Python 与应用主次版本一致"
+            exit 1
+          fi
+
+      # 先跑一遍本地就能跑的那部分测试。它会在几秒内拦住两类问题：
+      # 副本忘了同步（APK 里会是旧规则）、Python 桥接层被改坏。
+      # 比等五分钟打包完才发现划算得多。
+      - name: 快速自检（副本同步 + 桥接层）
+        run: python3 tests/test_apk_app.py
+
+      - name: 接受 SDK 许可并补齐所需组件
+        run: |
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -1)
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "platform-tools" > /dev/null 2>&1 || true
+          echo "--- 已安装的相关组件 ---"
+          "$SDKMANAGER" --list_installed 2>/dev/null | grep -Ei "platforms;android-3|build-tools;3" || true
+
+      # 密钥读不出来是最难查的一类失败（报错是 "keystore password was incorrect"，
+      # 让人以为是密码写错了，其实是格式不被这个 JDK 支持）。
+      # 所以在这里先单独验一次，失败了立刻停，报错信息明确。
+      - name: 预检签名密钥（JDK 能否读取）
+        working-directory: android-apk
+        run: |
+          keytool -list -keystore keystore/imgsnag.p12 -storetype PKCS12 \
+                  -storepass imgsnag -alias imgsnag
+
+      - name: 生成 Gradle 8.13 wrapper
+        run: |
+          mkdir -p /tmp/wrapper && cd /tmp/wrapper
+          gradle wrapper --gradle-version 8.13 --no-daemon --quiet
+          cp -r /tmp/wrapper/gradle /tmp/wrapper/gradlew /tmp/wrapper/gradlew.bat \
+                "$GITHUB_WORKSPACE/android-apk/"
+          chmod +x "$GITHUB_WORKSPACE/android-apk/gradlew"
+          cat "$GITHUB_WORKSPACE/android-apk/gradle/wrapper/gradle-wrapper.properties"
+
+      - name: 编译 release APK
+        working-directory: android-apk
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 读取版本号并整理产物名
+        id: pack
+        run: |
+          VER=$(grep -oP 'VERSION\s*=\s*"\K[^"]+' version.py | head -1)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          SRC=android-apk/app/build/outputs/apk/release/app-release.apk
+          OUT="ImgSnag_${VER}_android_arm64.apk"
+          mv "$SRC" "$OUT"
+          echo "apk=$OUT" >> "$GITHUB_OUTPUT"
+          ls -la "$OUT"
+
+      # 这一步是替代"在电脑上装一遍试试"的。没有真机可测，
+      # 就用能机器判定的方式确认关键东西真的进了包：
+      #   ① 签名有效（无效的 APK 手机根本装不上）
+      #   ② Python 运行时在（缺了会一打开就闪退，而且体积上看不出来）
+      #   ③ 我们自己的代码在（同步漏了会表现成"抓不到图"）
+      - name: 验包（签名 + 运行时 + 代码）
+        run: |
+          set -u
+          APK="${{ steps.pack.outputs.apk }}"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          echo "=== ① 签名 ==="
+          "$APKSIGNER" verify --print-certs "$APK"
+
+          echo "=== ② 包内容 ==="
+          unzip -l "$APK" > /tmp/contents.txt
+          ARMV8=$(grep -c "lib/arm64-v8a/" /tmp/contents.txt || true)
+          PYLIB=$(grep -c "libpython3" /tmp/contents.txt || true)
+          CHQ=$(grep -c "assets/chaquopy/" /tmp/contents.txt || true)
+          ICON=$(grep -c "ic_launcher" /tmp/contents.txt || true)
+          echo "arm64 原生库 $ARMV8 个 / libpython $PYLIB 个 / chaquopy 资源 $CHQ 条 / 图标 $ICON 条"
+          grep -E "libpython3|imgsnag" /tmp/contents.txt | head -10 || true
+
+          fail=0
+          [ "$ARMV8" -gt 0 ]  || { echo "::error::APK 里没有 arm64 原生库"; fail=1; }
+          [ "$PYLIB" -gt 0 ]  || { echo "::error::APK 里没有 libpython —— Chaquopy 没生效，装上也打不开"; fail=1; }
+          [ "$CHQ"  -gt 0 ]   || { echo "::error::APK 里没有 chaquopy 资源目录"; fail=1; }
+          [ "$ICON" -gt 0 ]   || { echo "::error::APK 里没有启动图标"; fail=1; }
+          exit $fail
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImgSnag-APK-${{ steps.pack.outputs.version }}
+          path: ${{ steps.pack.outputs.apk }}
+          if-no-files-found: error
+
+      # 挂到固定的 apk-latest 预发布上 —— 这样"去哪儿下"永远只有一个答案，
+      # 不用在 Actions 里翻构建记录、也不用解 zip。
+      - name: 发布到 Releases（apk-latest）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=apk-latest
+          gh release delete "$TAG" --yes --cleanup-tag > /dev/null 2>&1 || true
+          gh release create "$TAG" "${{ steps.pack.outputs.apk }}" \
+            --title "ImgSnag 安卓版 v${{ steps.pack.outputs.version }}（自动构建）" \
+            --prerelease \
+            --notes "由 GitHub Actions 自动构建，每次推送更新。
+
+**下载下面这个 .apk 文件**，传到手机点击安装即可（小米/红米需在弹窗里允许「安装未知应用」）。
+
+| 项目 | 值 |
+|---|---|
+| 版本 | v${{ steps.pack.outputs.version }} |
+| 架构 | arm64-v8a（红米 K80 等主流手机） |
+| 系统要求 | Android 10 及以上 |
+| 提交 | \`${{ github.sha }}\` |
+
+只申请了「网络访问」一个权限；图片存到相册的 \`Pictures/ImgSnagWeChat/\` 下。
+
+> 这是个**预发布**草稿位，只为方便下载，不是正式版本发布。"

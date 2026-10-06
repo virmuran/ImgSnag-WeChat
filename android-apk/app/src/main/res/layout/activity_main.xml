@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  界面。只有三样东西：一句说明、两个按钮、一块日志。
+
+  为什么做得这么素：这个 App 的界面**不是卖点**，抓取逻辑才是。
+  每加一个控件就多一处只在真机上才暴露的坑（触摸目标太小、深色模式看不清、
+  小屏挤成两行…），而我在这里没法跑模拟器验证。宁可少，宁可一眼看懂。
+
+  日志用 ScrollView + 等宽字体，是因为出错时用户需要把整段文字复制发出来 ——
+  textIsSelectable 就是为这个开的。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/hint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/hint"
+        android:textSize="13sp"
+        android:textColor="@color/hint"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="10dp">
+
+        <Button
+            android:id="@+id/btn_clip"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/btn_clip"/>
+
+        <Button
+            android:id="@+id/btn_gallery"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="@string/btn_gallery"/>
+    </LinearLayout>
+
+    <ScrollView
+        android:id="@+id/scroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="10dp"
+        android:padding="8dp"
+        android:background="@color/log_bg">
+
+        <TextView
+            android:id="@+id/log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/log_init"
+            android:textSize="12sp"
+            android:typeface="monospace"
+            android:textColor="@color/log_fg"
+            android:textIsSelectable="true"/>
+    </ScrollView>
+
+</LinearLayout>

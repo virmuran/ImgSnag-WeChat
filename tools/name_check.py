@@ -22,9 +22,47 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)          # tools/ 的上一级 = 项目根
-PKG = os.path.join(ROOT, 'web_image_dl')
+
+#: 要扫描的源码根目录。
+#: `android/app` 是手机端（Termux）代码 —— 里面的 web_image_dl 是自动同步的副本
+#: （扫出来会和主项目一致），但主程序 imgsnag.py 是手写的，同样会踩"名字丢失"
+#: 这类坑，所以一并扫。
+TARGETS = [
+    os.path.join(ROOT, 'web_image_dl'),
+    os.path.join(ROOT, 'android', 'app'),
+    # 安卓 APK 里的 Python（Chaquopy 的固定目录）。
+    # 其中 web_image_dl/ 与 imgsnag.py 是自动同步的副本，但
+    # imgsnag_android.py 是手写的 —— 手写的那份必须一起扫。
+    os.path.join(ROOT, 'android-apk', 'app', 'src', 'main', 'python'),
+]
 BUILTINS = set(dir(builtins)) | {'__file__', '__name__', '__doc__', '__package__',
                                  '__spec__', '__loader__', 'self', 'cls'}
+
+#: `except*`（3.11+）的节点类型；老版本没有就留空
+_TRY_STAR = (ast.TryStar,) if hasattr(ast, 'TryStar') else ()
+
+#: 会开新作用域的节点。遍历"本层名字引用"时必须跳过它们的内部 ——
+#: 嵌套函数有自己的形参，被外层一起扫就会变成"未定义名"
+#: （实测：make_get 里 `def _get(url, **kw)`，ast.walk 冲进 _get 体内，
+#:   把 url / kw 报成未定义）。它们的内部由 iter_nested_defs 递归处理。
+_SCOPE_BOUNDARY = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def iter_own_scope(node):
+    """遍历 node 的名字引用，但**不深入**嵌套函数/类（它们的形参自成一域）。"""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _SCOPE_BOUNDARY):
+            continue
+        yield child
+        yield from iter_own_scope(child)
+
+
+def iter_nested_defs(node):
+    """列出嵌套在 node 里的所有函数/类定义（含更深层），用于递归检查。"""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _SCOPE_BOUNDARY):
+            yield child
+        yield from iter_nested_defs(child)
 
 
 def target_names(node):
@@ -76,13 +114,24 @@ def stmt_bound_names(stmt):
             if isinstance(sub, ast.stmt):
                 out |= stmt_bound_names(sub)
         return out
-    # if / try / while：把子语句里绑定的名字也算进来（静态近似）
-    if isinstance(stmt, (ast.If, ast.Try, ast.While)):
+    # try：body / else / finally 里的绑定靠下面那条通用递归就能收上来，
+    # 但 **except 块收不到** —— ast.ExceptHandler 不是 ast.stmt 的子类，
+    # 会被 `isinstance(sub, ast.stmt)` 过滤掉，于是 except 里赋的值统统被当成
+    # "未定义名"（imgsnag.py 里 `except` 中赋的 msg 就是这么被误报的）。
+    # 所以 handler 体要单独补一遍。TryStar 是 3.11+ 的 `except*`，同理。
+    if isinstance(stmt, (ast.Try,) + _TRY_STAR):
         out = set()
-        if isinstance(stmt, ast.Try):
-            for h in stmt.handlers:
-                if h.name:
-                    out.add(h.name)
+        for h in stmt.handlers:
+            if h.name:
+                out.add(h.name)
+            out |= bound_in_body(h.body)
+        for sub in ast.iter_child_nodes(stmt):
+            if isinstance(sub, ast.stmt):
+                out |= stmt_bound_names(sub)
+        return out
+    # if / while：把子语句里绑定的名字也算进来（静态近似）
+    if isinstance(stmt, (ast.If, ast.While)):
+        out = set()
         for sub in ast.iter_child_nodes(stmt):
             if isinstance(sub, ast.stmt):
                 out |= stmt_bound_names(sub)
@@ -133,11 +182,24 @@ def check_name_loads(fn_node, outer_names, problems, where):
             if a.kwarg:
                 local.add(a.kwarg.arg)
 
-    for node in ast.walk(fn_node):
+    for node in iter_own_scope(fn_node):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             if node.id in local or node.id in outer_names or node.id in BUILTINS:
                 continue
             problems.append(f'{where}:{node.lineno} 未定义名 `{node.id}`')
+
+    # 嵌套函数/类另起作用域，但能看见本层与更外层的名字（闭包）——
+    # 所以把 `local | outer_names` 当作它们的外层继续检查
+    inner_outer = local | outer_names
+    for sub in iter_nested_defs(fn_node):
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            check_name_loads(sub, inner_outer, problems, f'{where}::{sub.name}')
+        else:
+            check_self_attrs(sub, problems, f'{where}::{sub.name}')
+            for m in sub.body:
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    check_name_loads(m, inner_outer, problems,
+                                     f'{where}::{sub.name}::{m.name}')
 
 
 def check_self_attrs(cls_node, problems, where):
@@ -194,12 +256,15 @@ def scan(path):
 
 def main():
     files = []
-    for base, _dirs, names in os.walk(PKG):
-        if '__pycache__' in base:
+    for pkg in TARGETS:
+        if not os.path.isdir(pkg):
             continue
-        for n in sorted(names):
-            if n.endswith('.py'):
-                files.append(os.path.join(base, n))
+        for base, _dirs, names in os.walk(pkg):
+            if '__pycache__' in base:
+                continue
+            for n in sorted(names):
+                if n.endswith('.py'):
+                    files.append(os.path.join(base, n))
 
     total = 0
     for p in files:
