@@ -51,6 +51,7 @@ WEB_PY = os.path.join(PY_DIR, 'imgsnag_web.py')
 sys.path.insert(0, PY_DIR)
 sys.path.insert(0, os.path.join(ROOT, 'android'))       # sync_core
 
+import imgsnag                                            # noqa: E402
 import imgsnag_android as android                        # noqa: E402
 import imgsnag_web as web                                # noqa: E402
 import webui                                             # noqa: E402
@@ -78,6 +79,21 @@ def read(path):
         return f.read()
 
 
+def strip_comments(text):
+    """摘掉 Java 的 `//` 与 `/* */` 注释，只留真正的代码。
+
+    为什么非摘不可：源码里写着"`canGoBack()` 为假就退出 App"这种说明注释，
+    于是 `'canGoBack()' in src` **光靠注释就凑齐了** —— 把真正的代码删掉，
+    断言照样绿。同理"桥方法必须标 `@JavascriptInterface`"那句注释，
+    会让"漏注解"这件事查不出来。
+
+    一句话规矩：**凡是"在源码里找某个字符串"的检查，都要先摘掉注释再找。**
+    （反向验证抓出来的，不是想出来的 —— 抓出两条。）
+    """
+    text = re.sub(r'/\*[\s\S]*?\*/', '', text)
+    return re.sub(r'//[^\n]*', '', text)
+
+
 # ============================================================================
 #  假环境
 # ============================================================================
@@ -95,6 +111,17 @@ FULL_B = b'\x89PNG\r\n\x1a\n' + b'B' * 900
 THUMB_A = b'\xff\xd8\xff\xe0' + b'a' * 600        # /640 档（压缩）
 THUMB_B = b'\x89PNG\r\n\x1a\n' + b'b' * 600
 
+#: 小图体检要用的一对：一张明显大于阈值（默认 12 KB）、一张明显小于。
+#: 阈值是**按体积**判的，所以这两张的字节数要卡在阈值两侧才有意义。
+#:
+#: ⚠ 小图那张不能小于 `imgsnag.MIN_IMAGE_BYTES`（500 字节）：比它还小的响应
+#: 在下载那一步就被当成失败丢掉了（CDN 出错时返回的占位图就那么大），
+#: 根本轮不到体检 —— 拿它当"小图"用例，会得到"体积 0 = 没量到"，
+#: 而 0 不算小图，测试红得莫名其妙（这条就是踩过之后写下的）。
+BIG_A = b'\xff\xd8\xff\xe0' + b'A' * 20000        # 约 20 KB：正常配图
+TINY_T = b'\x89PNG\r\n\x1a\n' + b't' * 800        # 约 0.8 KB：表情/二维码那一类
+PIC_T = 'https://mmbiz.qpic.cn/mmbiz_png/TINYTINYTINY/640?wx_fmt=png'
+
 TITLE = '秋天的第一杯奶茶'
 
 
@@ -107,17 +134,29 @@ def article(pics=(PIC_A, PIC_B)) -> str:
 class FakeGet:
     """假网络：区分原图档 / 压缩档，并记下每个请求。"""
 
-    def __init__(self, pages=None, full=None, thumb=None):
+    def __init__(self, pages=None, full=None, thumb=None, sizes=None):
         self.pages = dict(pages or {})
         self.full = full or FULL_A
         self.thumb = thumb or THUMB_A
+        #: 指定某些图用多大的字节：{地址里的关键字: (原图档字节, 压缩档字节)}。
+        #: 小图体检是**按体积**判的，不给几张大小悬殊的图就验不了。
+        self.sizes = dict(sizes or {})
         self.calls = []
+
+    def _sized(self, url):
+        for key, pair in self.sizes.items():
+            if key in url:
+                return pair[0] if url.endswith('/0') else pair[1]
+        return None
 
     def __call__(self, url, **kw):
         self.calls.append(url)
         if url in self.pages:
             return android._Response(200, self.pages[url].encode('utf-8'))
         if 'mmbiz.qpic.cn' in url:
+            sized = self._sized(url)
+            if sized is not None:
+                return android._Response(200, sized)
             png = 'png' in url
             if url.endswith('/0'):
                 return android._Response(200, FULL_B if png else self.full)
@@ -187,6 +226,11 @@ class Client:
 def _boot(tmp, **kw):
     fake = kw.pop('fake', None) or FakeGet(pages={ARTICLE_URL: article()})
     album = kw.pop('album', None) or FakeAlbum(os.path.join(tmp, 'album'))
+    seed = kw.pop('settings', None)
+    if seed is not None:
+        # 偏好是 Engine 构造时从磁盘读的 —— 所以要在 start() 之前落盘才算数
+        with open(os.path.join(tmp, web.SETTINGS_FILE), 'w', encoding='utf-8') as f:
+            json.dump(seed, f, ensure_ascii=False)
     port = web.start(root=tmp, version='9.9.9', get=fake, publish=album, **kw)
     return Client(port), fake, album
 
@@ -239,7 +283,10 @@ def test_full_chain():
     print('[2] 解析 → 按需缩略图 → 挑图保存（真服务）')
     tmp = tempfile.mkdtemp()
     try:
-        cli, fake, album = _boot(tmp)
+        # 这条链路只关心"抓 → 挑 → 存"，所以先把「跳过小图」关掉：
+        # 开着的话解析完会紧接着体检（那会把缩略图都下一遍，见 [9]）。
+        # 这也顺带证明了关掉开关真的零额外下载。
+        cli, fake, album = _boot(tmp, settings={'skip_tiny': False})
 
         st = cli.json('/api/state')
         eq(st['phase'], 'idle', '刚起来是空闲态')
@@ -259,7 +306,8 @@ def test_full_chain():
         eq(st['album'], web.ALBUM_SUBDIR, '页面知道相册子目录名')
 
         eq(fake.hits('mp.weixin.qq.com'), 1, '文章只抓一次')
-        eq(fake.hits('mmbiz.qpic.cn'), 0, '**解析阶段一张图都不下**（缩略图按需加载）')
+        eq(fake.hits('mmbiz.qpic.cn'), 0,
+           '**关掉小图过滤后，解析阶段一张图都不下**（缩略图纯按需加载）')
         check(any('开始解析' in ln for ln in st['log']), '日志里有起点，出问题能截图')
 
         # ── 缩略图：应当取 /640 压缩档 ──
@@ -543,7 +591,200 @@ def test_album_failure():
 
 
 # ============================================================================
-#  三、静态契约（跨语言、跨文件的对应关系）
+#  三、P2：小图体检、保存画质、偏好
+# ============================================================================
+
+def _wait_check(cli, want, timeout=25):
+    """等体检跑完（它是解析之后在后台接着跑的）。"""
+    end = time.time() + timeout
+    st = cli.json('/api/state')
+    while time.time() < end:
+        st = cli.json('/api/state')
+        if not st['check']['running'] and st['check']['done'] >= want:
+            return st
+        time.sleep(0.1)
+    return st
+
+
+def test_inspect_tiny():
+    print('[9] 小图体检（默认开着，且不花额外流量）')
+    tmp = tempfile.mkdtemp()
+    try:
+        # ⚠ 匹配用"文件号"那一段，不是整条地址：适配器给出的候选项会把查询串
+        # 剥掉（`/640?wx_fmt=jpeg` → `/640`），拿整条 URL 当键一条都匹配不上，
+        # 于是所有图都落到默认字节、全都算小图 —— 断言会红，但红得莫名其妙。
+        fake = FakeGet(pages={ARTICLE_URL: article((PIC_A, PIC_T))},
+                       sizes={'AAAAAAAABBBBCCCC': (BIG_A, BIG_A),
+                              'TINYTINYTINY': (TINY_T, TINY_T)})
+        cli, fake, _ = _boot(tmp, fake=fake)
+        cli.post('/api/parse', {'source': ARTICLE_URL})
+        st = cli.wait()
+        eq(st['phase'], 'ready', '解析完成')
+        eq(st['count'], 2, '两张图')
+        eq(st['settings']['skip_tiny'], True, '默认就开着过滤')
+
+        eq(fake.hits('/0'), 0, '体检只碰压缩档 —— 它就是要显示的那张，零额外流量')
+        eq(fake.hits('/640'), 2, '两张的缩略图都量过了')
+
+        st = _wait_check(cli, 2)
+        eq(st['check']['done'], 2, '两张都体检完')
+        eq(st['check']['running'], False, '体检结束')
+        eq(st['tiny'], [2], '只有第 2 张被认成小图（第 1 张 20 KB 不算小）')
+
+        # 阈值跟着设置走：调大阈值，第一张也会被算成小图
+        cli.post('/api/settings', {'tiny_kb': 50})
+        eq(cli.json('/api/state')['tiny'], [1, 2], '改阈值立刻生效（不用重新解析）')
+
+        # 关掉开关之后，不再有"小图"这回事
+        cli.post('/api/settings', {'skip_tiny': False})
+        eq(cli.json('/api/state')['tiny'], [], '关掉过滤就没有小图清单了')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_quality_toggle():
+    print('[10] 保存画质（原图档 / 压缩档）')
+    tmp = tempfile.mkdtemp()
+    try:
+        # ① 默认：存原图
+        fake = FakeGet(pages={ARTICLE_URL: article((PIC_A,))})
+        album1 = FakeAlbum(os.path.join(tmp, 'album1'))
+        cli, fake, _ = _boot(tmp, fake=fake, album=album1,
+                             settings={'skip_tiny': False})
+        cli.post('/api/parse', {'source': ARTICLE_URL})
+        cli.wait()
+        fake.reset()
+        cli.post('/api/save', {'idxs': [1]})
+        st = cli.wait(want=('saved', 'error'))
+        eq(st['phase'], 'saved', '存下来了')
+        eq(fake.hits('/0'), 1, '默认取原图档')
+        folder, _ = album1.calls[0]
+        with open(os.path.join(album1.base, folder, 'img_01.jpg'), 'rb') as f:
+            eq(f.read(), FULL_A, '落盘的是原图档的字节')
+        web.stop()
+
+        # ② 关掉「保存原图」：只用压缩档，一次都不碰原图档
+        fake = FakeGet(pages={ARTICLE_URL: article((PIC_A,))})
+        album2 = FakeAlbum(os.path.join(tmp, 'album2'))
+        cli, fake, _ = _boot(tmp, fake=fake, album=album2,
+                             settings={'skip_tiny': False, 'original': False})
+        cli.post('/api/parse', {'source': ARTICLE_URL})
+        cli.wait()
+        fake.reset()
+        cli.post('/api/save', {'idxs': [1]})
+        st = cli.wait(want=('saved', 'error'))
+        eq(st['phase'], 'saved', '存下来了')
+        eq(fake.hits('/0'), 0, '关掉之后一次都不碰原图档（这才是省流量）')
+        folder, _ = album2.calls[0]
+        with open(os.path.join(album2.base, folder, 'img_01.jpg'), 'rb') as f:
+            eq(f.read(), THUMB_A, '落盘的是压缩档的字节')
+        check('压缩档' in st['message'],
+              f'结果里说清了"存的是压缩档"：{st["message"]!r}')
+        web.stop()
+
+        # ③ 单张请求可以当场覆盖设置（大图页的"存这张"走的就是这条路）
+        fake = FakeGet(pages={ARTICLE_URL: article((PIC_A,))})
+        album3 = FakeAlbum(os.path.join(tmp, 'album3'))
+        cli, fake, _ = _boot(tmp, fake=fake, album=album3,
+                             settings={'skip_tiny': False, 'original': False})
+        cli.post('/api/parse', {'source': ARTICLE_URL})
+        cli.wait()
+        fake.reset()
+        cli.post('/api/save', {'idxs': [1], 'original': True})
+        st = cli.wait(want=('saved', 'error'))
+        eq(st['phase'], 'saved', '存下来了')
+        eq(fake.hits('/0'), 1, '显式要求原图时就按原图走，不受设置影响')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_settings():
+    print('[11] 偏好：只认认识的键、值不能乱、改完要落盘')
+    eq(web.DEFAULT_SETTINGS['original'], True, '默认存原图')
+    eq(web.DEFAULT_SETTINGS['skip_tiny'], True, '默认跳过小图')
+
+    # 纯函数：前端传来的东西不能信
+    eq(web.normalize_settings({'original': 'false'}), {},
+       "字符串 'false' 不算数（写成 bool(value) 会让开关怎么点都是开的）")
+    eq(web.normalize_settings({'original': False}), {'original': False}, '真 bool 才收')
+    eq(web.normalize_settings({'original': True}), {'original': True}, 'true 照收')
+    eq(web.normalize_settings({'tiny_kb': '20'}), {'tiny_kb': 20}, '数字字符串转成整数')
+    eq(web.normalize_settings({'tiny_kb': -5}), {'tiny_kb': 0}, '负数压到 0')
+    eq(web.normalize_settings({'tiny_kb': 'abc'}), {}, '不是数字就丢掉')
+    eq(web.normalize_settings({'nope': 1}), {}, '不认识的键直接扔掉')
+    eq(web.normalize_settings(None), {}, 'None 不炸')
+
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, 'x.json')
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('{ 这不是 json')
+        eq(web.load_settings(p), web.DEFAULT_SETTINGS, '坏文件退回默认值（不能抛）')
+        eq(web.load_settings(os.path.join(tmp, 'nope.json')), web.DEFAULT_SETTINGS,
+           '文件不在也退回默认值')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        cli, _, _ = _boot(tmp, settings={'skip_tiny': False})
+        eq(cli.json('/api/state')['settings']['skip_tiny'], False, '启动时读到盘上的偏好')
+
+        r = cli.post('/api/settings', {'skip_tiny': True})
+        eq(r['settings']['skip_tiny'], True, '改完立刻返回新值')
+        eq(cli.json('/api/state')['settings']['skip_tiny'], True, '状态里也跟着变')
+        eq(web.load_settings(os.path.join(tmp, web.SETTINGS_FILE))['skip_tiny'], True,
+           '确实落盘了（重启还在）')
+        web.stop()
+
+        cli, _, _ = _boot(tmp)
+        eq(cli.json('/api/state')['settings']['skip_tiny'], True, '重启后仍是改过的值')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pick_source():
+    print('[12] 剪贴板：两份内容里挑哪一份去解析')
+    # 只有一段文本时，必须与老函数**完全一致** —— 否则就是悄悄改了老路径，
+    # 而那条路（分享进来）是这个 App 的主用法。
+    for raw in ('https://mp.weixin.qq.com/s/x',
+                '秋天的第一杯奶茶\nhttps://mp.weixin.qq.com/s/x',
+                '<html><body><img data-src="a.png"></body></html>',
+                'mp.weixin.qq.com/s/x', '', '   '):
+        eq(web.pick_source(raw), imgsnag.resolve_source(raw),
+           f'只有一段文本时与老规则一致：{raw[:24]!r}')
+
+    html = ('<html><body><img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/AA/640">'
+            '</body></html>')
+    eq(web.pick_source('秋天的第一杯奶茶', html), (html, False),
+       '纯文本没链接 → 把 HTML 当源码（浏览器里复制的正文就是这样）')
+    eq(web.pick_source('见 https://mp.weixin.qq.com/s/x', html),
+       ('https://mp.weixin.qq.com/s/x', True), '有链接就用链接（最省流量）')
+    src = '<html><body>手粘的</body></html>'
+    eq(web.pick_source(src, html), (src, False), '自己粘的源码优先于剪贴板里的 HTML')
+    # ⚠ HTML 里的第一个链接往往是 <img src>，那是图片地址、不是文章地址
+    check(web.pick_source('只有一句话', html)[0] == html,
+          '不会把 HTML 里的图片地址当成文章地址去解析')
+
+    # 端到端：纯文本没链接、内容是 HTML
+    tmp = tempfile.mkdtemp()
+    try:
+        cli, fake, _ = _boot(tmp, settings={'skip_tiny': False})
+        cli.post('/api/parse', {'source': '秋天的第一杯奶茶', 'html': article()})
+        st = cli.wait()
+        eq(st['phase'], 'ready', '从剪贴板 HTML 解析成功')
+        eq(st['count'], 2, '抓到了 HTML 里的两张图')
+        eq(fake.hits('mp.weixin.qq.com'), 0, '当源码用时不需要再去抓网页')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============================================================================
+#  四、静态契约（跨语言、跨文件的对应关系）
 # ============================================================================
 
 def test_page_contract():
@@ -588,11 +829,37 @@ def test_page_contract():
     check("'/api/save'" in page, '有保存到相册的动作')
     check('全选' in page, '有全选（几十张时不能靠手点）')
 
+    # 大图要能左右滑（用户实测反馈："只能返回再点第二张"）
+    # ⚠ 一律带引号或括号一起比对：裸写 `'touchstart' in page`，
+    #   把事件名改成 `touchstartx` 照样命中（子串），断言是假的。
+    check("'touchstart'" in page and "'touchend'" in page, '大图接了触摸手势')
+    check('function step(' in page, '有"上一张/下一张"这个动作')
+    check("'ArrowLeft'" in page and "'ArrowRight'" in page,
+          '键盘左右键也能翻（电脑上调试方便）')
+    check('id="vPrev"' in page and 'id="vNext"' in page, '大图两侧有翻页按钮')
+
+    # 系统侧边滑动返回要能逐层退 —— 靠的就是这些 pushState
+    check('history.pushState(' in page, '视图切换会压一层返回栈')
+    check('history.replaceState(' in page, '栈底换成自己的条目（否则后退会退穿页面）')
+    check("addEventListener('popstate'" in page, '响应系统返回')
+    check('history.back()' in page, '页面里的"返回/关闭"走的是同一条回退路径')
+
+    # 剪贴板与偏好
+    check(re.search(r'window\.[A-Za-z0-9_$]+\.read\(\)', page) is not None,
+          '页面会去读那个剪贴板桥')
+    check("'/api/settings'," in page, '页面能改偏好')
+    check('id="setOriginal"' in page, '有"保存原图"开关')
+    check('id="setSkipTiny"' in page, '有"自动跳过小图"开关')
+    check('appearance:none' in page, '开关是自绘的，不靠系统控件（各家 ROM 长得不一样）')
+    check("classList.toggle('mini'" in page, '小图在网格里有标记')
+
 
 def test_java_contract():
     print('[10] 与 Java 的握手点（静态比对）')
-    gallery = read(os.path.join(JAVA_DIR, 'Gallery.java'))
-    main = read(os.path.join(JAVA_DIR, 'MainActivity.java'))
+    # ⚠ 全部先摘注释：这里全是"在源码里找字符串"的检查，
+    #   而注释里为了讲清楚道理，往往会把同一个字符串再写一遍。
+    gallery = strip_comments(read(os.path.join(JAVA_DIR, 'Gallery.java')))
+    main = strip_comments(read(os.path.join(JAVA_DIR, 'MainActivity.java')))
     webpy = read(WEB_PY)
 
     # ① 相册目录名两边一致
@@ -653,7 +920,28 @@ def test_java_contract():
         eq(len(re.findall(r'<domain[ >]', body)), 1,
            '只放行一个域，不是全局开明文')
 
-    # ⑦ 手写的文件不能被同步覆盖
+    # ⑦ 返回键与剪贴板桥（这两件事都在 Java 侧，本机验不了，只能钉契约）
+    check('onBackPressed' in main, 'Java 处理返回键（侧边滑动返回也走它）')
+    check('canGoBack()' in main and 'goBack()' in main,
+          '返回键先让网页往回退 —— 不这样的话侧滑就直接退回桌面')
+    check(re.search(r'@Override[\s\S]{0,120}?public void onBackPressed\s*\(\s*\)',
+                    main) is not None,
+          'onBackPressed 确实是一个覆写的方法（漏了 @Override 就是新写了个没人调的）')
+    bridge = re.search(r'BRIDGE_NAME\s*=\s*"([^"]+)"', main)
+    check(bridge is not None, 'Java 里定义了注入给网页的对象名')
+    # 两边的名字要**互相**对得上。别用 `f'window.{name}' in PAGE` 这种写法：
+    # 那是子串匹配，把一边改名成 `imgsnagx`，另一边的 `window.imgsnag` 照样"在"。
+    # （反向验证把这条抓出来过一次。）
+    js_bridge = re.search(r'window\.([A-Za-z0-9_$]+)\s*&&\s*window\.\1\.read', webui.PAGE)
+    check(js_bridge is not None, '页面确实在用那个桥（window.<名字>.read）')
+    if bridge and js_bridge:
+        eq(js_bridge.group(1), bridge.group(1),
+           '注入名与页面里读的名字一致（不一致＝按钮永远说读不到，且一点报错都没有）')
+    check('@JavascriptInterface' in main, '桥方法标了注解（不标就不暴露给 JS）')
+    check('addJavascriptInterface' in main, '确实注入了桥')
+    check('getHtmlText' in main, '连剪贴板里的 HTML 一起取（浏览器复制的正文在里面）')
+
+    # ⑧ 手写的文件不能被同步覆盖
     planned = [rel for rel, _src, _d in sync_core.planned()]
     check('imgsnag_web.py' not in planned, 'imgsnag_web.py 是手写的，不进同步清单')
     check('webui.py' not in planned, 'webui.py 是手写的，不进同步清单')
@@ -704,8 +992,9 @@ def main():
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     for fn in (test_helpers, test_full_chain, test_share_push, test_dedup_and_partial,
                test_partial_download, test_errors, test_net_failure_falls_back,
-               test_album_failure, test_page_contract, test_java_contract,
-               test_isolation):
+               test_album_failure, test_inspect_tiny, test_quality_toggle,
+               test_settings, test_pick_source, test_page_contract,
+               test_java_contract, test_isolation):
         try:
             fn()
         except Exception:                                       # noqa: BLE001

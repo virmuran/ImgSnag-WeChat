@@ -28,6 +28,26 @@
     ② 分享投递：Java 调 `push_share(文本)`
     ③ 启动：Java 调 `start(ctx, 版本号)`，拿回端口
 除这三处之外两边互不依赖 —— Java 越薄，能出错的地方越少。
+（页面里那个「从剪贴板」按钮走的是 WebView 的只读 JS 桥，不经过本模块。）
+
+────────────────────────────────────────────────────────────────────────
+偏好：小图过滤与保存画质
+────────────────────────────────────────────────────────────────────────
+存在应用目录下的 `web_settings.json`（原子写）。两个开关：
+
+**保存画质** —— 开＝保存时取原图档（清晰、费流量），关＝取压缩档。
+微信那张图本来就有两个档位，这里只是决定"点保存时用哪个"，不额外下载。
+
+**跳过小图** —— 表情、二维码、分割线这类小图是相册里最烦的垃圾。
+解析完成后会有一个**体检**：逐张把缩略图档拿一遍，量体积，小于阈值的
+在界面上**默认不勾选**（并打一个「小」标）。
+
+体检**不产生额外流量**：缩略图本来就要下给网格看，这里只是提前下、
+顺手量一下。关掉这个开关则完全跳过体检（不想要过滤的人零成本）。
+
+⚠ 小图只是"默认不勾"，**不是静默丢弃**：用户手动勾上的照存不误。
+在"用户的选择"和"机器的判断"之间，永远前者优先 —— 悄悄少存几张，
+比多存几张难查得多。
 
 ────────────────────────────────────────────────────────────────────────
 画质档位：缩略图与"保存时"用不同档
@@ -38,6 +58,9 @@
     保存时 用候选表**首位**（原图档）  —— 挑中的才下原图
 比桌面版更省：桌面版是先把每张按原图拉进内存、再挑哪些落盘。
 
+所以"体检"量的就是缩略图档的体积 —— 那张图本来就要下给网格看，
+量一下不花额外流量；而"关掉过滤"的用户连体检都不跑。
+
 格式不用地址猜、**用文件头判**（`sniff_ext`）—— 地址猜格式在这个项目上
 已经出过一次"整类 png 被存成 .jpg"，内容骗不了人。
 """
@@ -47,6 +70,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
 import sys
 import threading
@@ -94,6 +118,24 @@ MAX_SESSIONS = 5
 MAX_CONCURRENT_DOWNLOADS = 4
 
 _LOG_MAX = 200
+
+#: 偏好文件（放在应用目录里，跟会话缓存同处）。
+SETTINGS_FILE = 'web_settings.json'
+
+#: 默认偏好。**键名与默认值只写在这一处** —— 界面、路由、测试都从这里取，
+#: 免得"界面以为是开的、后端以为是关的"这种对不上还两边都不报错的情况。
+DEFAULT_SETTINGS = {
+    # True＝保存时取原图档（清晰、费流量）；False＝取压缩档（省流量）
+    'original': True,
+    # True＝解析后体检一遍，小图默认不勾选
+    'skip_tiny': True,
+    # 小于这个体积（KB）算小图。微信的表情/二维码通常只有几 KB，
+    # 正文配图几十到几百 KB —— 12 KB 这条线实测能分开这两类。
+    # ⚠ 别调到 `imgsnag.MIN_IMAGE_BYTES`（500 字节）以下：比它更小的响应
+    # 在下载那一步就被当失败丢了（CDN 出错时返回的占位图就那么大），
+    # 根本到不了体检这一步，阈值调得再低也筛不出东西来。
+    'tiny_kb': 12,
+}
 
 _MIME = {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -189,6 +231,77 @@ def title_from_path(path: str) -> str:
     return parts[2] if len(parts) == 3 else ''
 
 
+def pick_source(text: str, html: str = '') -> tuple:
+    """从「剪贴板里同时拿到的纯文本与 HTML」里决定拿哪个去解析。
+
+    手机剪贴板常常是**两份内容**：纯文本（可能只是标题或一坨空白）
+    加一份 HTML（浏览器复制富文本时才有）。三种情况，顺序即优先级：
+
+      1. 纯文本里有链接   → 用链接。最省流量，抓到的内容也最全
+      2. 纯文本本身就是 HTML（`<` 开头）→ 当源码用（用户自己粘的源码）
+      3. 两者都不像       → HTML 非空就用 HTML 当源码（浏览器里复制的正文）
+                           否则把纯文本原样交出去，让适配器自己去猜
+
+    ⚠ 传进来的 `html` **不能拿去 `extract_url`**：HTML 里的第一个链接
+    通常是 `<img src>`，那是图片地址不是文章地址 —— 拿它去解析只会
+    抓回一张图。所以这里只把 HTML 整体当源码。
+
+    `html=''` 时，本函数与 `imgsnag.resolve_source` 行为完全一致
+    （测试逐条对照过），所以它只是"多带了 HTML 这一路"，不是另一套规则。
+    """
+    text = (text or '').strip()
+    url = imgsnag.extract_url(text)
+    if url:
+        return url, True
+    if text.startswith('<'):
+        return text, False
+    if (html or '').strip():
+        return html, False
+    return text, True
+
+
+def load_settings(path: str) -> dict:
+    """读偏好。文件不在、坏了、多了不认识的键 —— 一律退回默认，绝不抛。"""
+    data = dict(DEFAULT_SETTINGS)
+    try:
+        with open(path, encoding='utf-8') as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return data
+    if isinstance(got, dict):
+        for key in DEFAULT_SETTINGS:
+            if key in got:
+                data[key] = got[key]
+    return data
+
+
+def normalize_settings(raw) -> dict:
+    """把外部传进来的偏好收敛成「只认识的键 + 正确的类型」。
+
+    前端传来的东西不能信：`{'original': 'false'}` 这种字符串真值会让
+    开关怎么点都是开的。布尔键只认真正的 bool，数字键转成非负整数。
+    """
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, default in DEFAULT_SETTINGS.items():
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(default, bool):
+            # ⚠ 只认**真正的**布尔值。写成 `bool(value)` 是个坑：
+            # 字符串 'false' 也是真值 → 表现是"开关怎么点都是开的"，
+            # 而且点一下看着生效了、刷新又弹回去。类型不对就保持原值。
+            if isinstance(value, bool):
+                out[key] = value
+        else:
+            try:
+                out[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 @dataclass
 class Item:
     """一张待处理的图：两个档位的地址都留着，用哪档由调用方决定。"""
@@ -251,6 +364,9 @@ class Engine:
         self._locks: dict = {}
         self.hist = HistoryManager(db_path=os.path.join(self.root, HISTORY_DB))
 
+        self.settings_path = os.path.join(self.root, SETTINGS_FILE)
+        self.settings = load_settings(self.settings_path)
+
         self._reset()
 
     # ── 状态 ────────────────────────────────────────────────────────────────
@@ -274,6 +390,11 @@ class Engine:
         self.entry_id = 0
         self.pending_share = ''
         self.logs: list = []
+        #: 小图体检的结果：{序号: 缩略图档字节数}。0 表示这张没拿到（不是小图）。
+        self.sizes: dict = {}
+        self.inspected = 0
+        self.checking = False
+        self.checked = False
         self._headers = imgsnag.build_headers('')
         self._locks = {}
 
@@ -300,7 +421,31 @@ class Engine:
                 'album': ALBUM_SUBDIR,
                 'label': APP_LABEL,
                 'version': self.version,
+                'settings': dict(self.settings),
+                #: 小图清单（序号，1 起）。阈值跟着设置走，用户一改立刻生效。
+                'tiny': self.tiny_indexes(),
+                #: 体检进度；`total` 为 0 或 `running` 为假且 `done` 为 0 时界面不显示
+                'check': {'done': self.inspected, 'total': len(self.items),
+                          'running': self.checking},
             }
+
+    def tiny_indexes(self) -> list:
+        """"会被自动跳过"的图序号（1 起，升序）。
+
+        两条判据都在这儿，页面只管照着用：
+          · 过滤关着 → 空表。用户说了不在乎小图，界面就不该再打标、再改勾选。
+          · 阈值跟着设置走，所以改阈值立刻生效，不必重新解析。
+
+        `0 < n`：没体检到（下不下来）的不算小图 —— 那是"坏图"，
+        跟"图小"是两回事，混在一起会让用户以为过滤逻辑坏了。
+        """
+        if not self.settings.get('skip_tiny'):
+            return []
+        limit = as_int(self.settings.get('tiny_kb'), 0) * 1024
+        if limit <= 0:
+            return []
+        with self.lock:
+            return sorted(i for i, n in self.sizes.items() if 0 < n < limit)
 
     # ── 路径 ────────────────────────────────────────────────────────────────
 
@@ -319,8 +464,12 @@ class Engine:
 
     # ── ① 解析 ──────────────────────────────────────────────────────────────
 
-    def parse(self, text: str) -> bool:
-        """开始解析（链接 / 分享文本 / 网页源码）。正在解析或保存时拒绝。"""
+    def parse(self, text: str, html: str = '') -> bool:
+        """开始解析（链接 / 分享文本 / 网页源码）。正在解析或保存时拒绝。
+
+        `html` 是「从剪贴板」那条路额外带过来的 HTML（浏览器复制的富文本）。
+        只有一个输入时传空串即可，行为与从前完全一样。
+        """
         with self.lock:
             if self.phase in ('parsing', 'saving'):
                 return False
@@ -328,13 +477,15 @@ class Engine:
             self.phase = 'parsing'
             self.message = '正在打开文章…'
         self.log_line(f'开始解析：{(text or "")[:120]}')
-        threading.Thread(target=self._parse_worker, args=(text or '',),
+        threading.Thread(target=self._parse_worker, args=(text or '', html or ''),
                          daemon=True).start()
         return True
 
-    def _parse_worker(self, text: str):
+    def _parse_worker(self, text: str, paste_html: str = ''):
         try:
-            source, is_url = imgsnag.resolve_source(text)
+            # ⚠ 参数叫 paste_html 而不是 html：下面 `html` 是**抓回来的网页正文**，
+            # 同名会把剪贴板那份悄悄覆盖掉（覆盖之后还不报错，只是行为诡异）。
+            source, is_url = pick_source(text, paste_html)
             if not source:
                 return self._fail('没能从这段内容里找到链接。\n'
                                   '可以复制文章链接后再试一次。')
@@ -394,10 +545,72 @@ class Engine:
             except Exception as e:                                  # noqa: BLE001
                 self.log_line(f'历史写入失败：{e}')
             self._prune()
+            # 网格已经在画了，接着把"哪几张是小图"量出来（零额外流量）
+            self._maybe_inspect()
 
         except Exception as e:                                      # noqa: BLE001
             traceback.print_exc()
             self._fail(f'{type(e).__name__}: {e}')
+
+    def _maybe_inspect(self):
+        """需要的话起一轮小图体检。守卫都在这儿，调用处不必判。"""
+        with self.lock:
+            if not self.settings.get('skip_tiny'):
+                return
+            if self.phase != 'ready' or not self.items:
+                return
+            if self.checking or self.checked:
+                return
+            self.checking = True
+            sid = self.sid
+        threading.Thread(target=self._inspect_worker, args=(sid,), daemon=True).start()
+
+    def _inspect_worker(self, sid: str):
+        """逐张把缩略图档量一遍体积 —— 这就是网格要显示的那批图。
+
+        并发跑（缩略图是一次几十毫秒的小请求，串行会让人干等十几秒），
+        但整体仍受 `_sem` 限流，不会把带宽全占了。
+
+        每张都回头看一眼 `self.sid` 还是不是起点那个：用户在体检途中
+        重新解析了另一篇，这条线程就该安静退出，而不是继续给旧会话干活。
+        """
+        box = queue.Queue()
+        for i in range(1, len(self.items) + 1):
+            box.put(i)
+
+        def one():
+            while True:
+                try:
+                    i = box.get_nowait()
+                except queue.Empty:
+                    return
+                if self.sid != sid:
+                    return
+                size = 0
+                try:
+                    path, _ = self._fetch_item(sid, 't', i)
+                    size = os.path.getsize(path)
+                except Exception:                                   # noqa: BLE001
+                    size = 0
+                with self.lock:
+                    self.sizes[i] = size
+                    self.inspected += 1
+
+        threads = [threading.Thread(target=one, daemon=True)
+                   for _ in range(min(MAX_CONCURRENT_DOWNLOADS, len(self.items)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        with self.lock:
+            if self.sid != sid:
+                return                          # 会话换了：别去改新会话的状态
+            self.checking = False
+            self.checked = True
+            tiny = len(self.tiny_indexes())
+        self.log_line(f'体检完成：{tiny} 张偏小，默认没勾' if tiny
+                      else '体检完成：没有小图')
 
     def _fail(self, message: str):
         with self.lock:
@@ -501,8 +714,12 @@ class Engine:
 
     # ── ③ 保存到相册 ────────────────────────────────────────────────────────
 
-    def save(self, idxs) -> bool:
-        """把选中的图按原图档下载、去重，交给 Java 写进相册。"""
+    def save(self, idxs, original=None) -> bool:
+        """把选中的图下载、去重，交给 Java 写进相册。
+
+        `original`：None＝按设置（默认原图档）；True/False 可当场覆盖
+        （界面上"存这张"就用了这个口子，不受设置影响）。
+        """
         with self.lock:
             if self.phase not in ('ready', 'saved'):
                 return False
@@ -510,15 +727,21 @@ class Engine:
             want = [x for x in want if 1 <= x <= len(self.items)]
             if not want:
                 return False
+            quality = bool(self.settings.get('original')
+                           if original is None else original)
             self.save_progress = {'done': 0, 'total': len(want)}
             self.phase = 'saving'
             self.message = f'正在保存 0/{len(want)}…'
-        self.log_line(f'开始保存 {len(want)} 张')
-        threading.Thread(target=self._save_worker, args=(want,), daemon=True).start()
+        self.log_line(f'开始保存 {len(want)} 张（{"原图" if quality else "压缩档"}）')
+        threading.Thread(target=self._save_worker, args=(want, quality),
+                         daemon=True).start()
         return True
 
-    def _save_worker(self, idxs):
+    def _save_worker(self, idxs, original=True):
         sid, folder = self.sid, self.folder
+        # 画质就是"取哪一档"：原图档走 'f'，压缩档走 't'（＝网格那张缩略图，
+        # 通常已经在磁盘上了，等于零额外下载）。
+        kind = 'f' if original else 't'
         out = os.path.join(self.session_dir(sid), OUT_DIR)
         clear_dir(out)
         os.makedirs(out, exist_ok=True)
@@ -527,7 +750,7 @@ class Engine:
         try:
             for n, i in enumerate(idxs, 1):
                 try:
-                    path, ext = self._fetch_item(sid, 'f', i)
+                    path, ext = self._fetch_item(sid, kind, i)
                     with open(path, 'rb') as f:
                         data = f.read()
                 except (Failed, NotFound, OSError) as e:
@@ -553,7 +776,7 @@ class Engine:
             return
 
         if not kept:
-            return self._finish(out, 0, dup, fail, folder)
+            return self._finish(out, 0, dup, fail, folder, original)
 
         try:
             published = int(self._publish(out, folder) or 0)
@@ -561,7 +784,7 @@ class Engine:
             traceback.print_exc()
             clear_dir(out)
             return self._fail(f'写进相册失败：{type(e).__name__}: {e}')
-        self._finish(out, published, dup, fail, folder)
+        self._finish(out, published, dup, fail, folder, original)
 
     def _publish(self, out_dir: str, folder: str) -> int:
         """交给 Java 写系统相册。
@@ -574,7 +797,8 @@ class Engine:
             raise RuntimeError('没有接入相册（电脑上跑时应当注入一个假的）')
         return self.publish(out_dir, folder)
 
-    def _finish(self, out: str, published: int, dup: int, fail: int, folder: str):
+    def _finish(self, out: str, published: int, dup: int, fail: int, folder: str,
+                original: bool = True):
         clear_dir(out)
         # 原图缓存不留在磁盘上 —— 图已经在相册里了，留着白占几十兆
         clear_dir(os.path.join(self.session_dir(self.sid), FULL_DIR))
@@ -582,6 +806,8 @@ class Engine:
         path = f'Pictures/{ALBUM_SUBDIR}/{folder}'
         if published:
             msg = f'已存入相册：{path}（{published} 张）'
+            if not original:
+                msg += '\n（按设置存的是压缩档，想存原图去首页打开开关）'
             if dup:
                 msg += f'\n另有 {dup} 张与前面的重复，已跳过'
             if fail:
@@ -680,6 +906,30 @@ class Engine:
             return True
         except Exception:                                           # noqa: BLE001
             return False
+
+    # ── ⑤ 偏好 ──────────────────────────────────────────────────────────────
+
+    def set_settings(self, patch) -> dict:
+        """改偏好并落盘，返回改完之后的完整快照。
+
+        存不下来（磁盘满/权限）只记一行日志、不抛：偏好丢了顶多是下次
+        回到默认值，为此把当前这次保存搞失败完全不划算。
+        """
+        clean = normalize_settings(patch)
+        with self.lock:
+            self.settings.update(clean)
+            snap = dict(self.settings)
+        try:
+            write_atomic(self.settings_path,
+                         json.dumps(snap, ensure_ascii=False).encode('utf-8'))
+        except OSError as e:
+            self.log_line(f'偏好没能存下来（下次会回到默认值）：{e}')
+        if clean:
+            self.log_line('偏好已更新：'
+                          + '、'.join(f'{k}={v}' for k, v in clean.items()))
+        # 刚把"跳过小图"打开、而这次会话还没体检过 —— 补一轮
+        self._maybe_inspect()
+        return snap
 
 
 # ============================================================================
@@ -824,12 +1074,18 @@ def make_handler(engine: Engine):
             data = self._body()
 
             if path == '/api/parse':
-                ok = engine.parse(str(data.get('source') or ''))
+                ok = engine.parse(str(data.get('source') or ''),
+                                  str(data.get('html') or ''))
                 return self._json({'ok': ok, 'state': engine.state()})
 
             if path == '/api/save':
-                ok = engine.save(data.get('idxs') or [])
+                ok = engine.save(data.get('idxs') or [],
+                                 data.get('original'))
                 return self._json({'ok': ok, 'state': engine.state()})
+
+            if path == '/api/settings':
+                patch = data.get('settings') if 'settings' in data else data
+                return self._json({'ok': True, 'settings': engine.set_settings(patch)})
 
             if path == '/api/history/open':
                 return self._json(engine.open_history(data.get('id') or 0))

@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -24,18 +25,22 @@ import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
 /**
- * 界面外壳。真正干活的全在 Python 里，这里只做三件事：
+ * 界面外壳。真正干活的全在 Python 里，这里只做四件事：
  *
  *   1. 启动 Python 侧的本地服务（{@code imgsnag_web.start}），拿回端口号；
  *   2. 用一个 WebView 加载 {@code http://127.0.0.1:<端口>/} ——
  *      网格、大图预览、历史页都在那个网页里；
- *   3. 把「微信分享过来的文本」转交给界面（{@code imgsnag_web.push_share}）。
+ *   3. 把「微信分享过来的文本」转交给界面（{@code imgsnag_web.push_share}）；
+ *   4. 把返回键（含侧边滑动返回）交给网页的层级去处理
+ *      （{@code onBackPressed} + 一个只读的剪贴板桥）。
  *
  * ── 为什么这套东西跑在本机的一个端口上 ──
  * 页面与接口**同源**：不需要处理跨域，也不需要写 JS↔Java 的桥。
@@ -62,6 +67,13 @@ public class MainActivity extends Activity {
 
     /** 等网页起来的上限。超过就认定失败并把兜底按钮亮出来。 */
     private static final int BOOT_TIMEOUT_MS = 15000;
+
+    /**
+     * 注入给网页的全局对象名（网页里用 `window.imgsnag.read()` 调）。
+     * 两边的名字必须一致，测试钉住这条 —— 改名忘了改另一边，
+     * 表现是「从剪贴板」按钮永远提示读不到，且不报错。
+     */
+    private static final String BRIDGE_NAME = "imgsnag";
 
     private WebView web;
     private View splash;
@@ -164,6 +176,11 @@ public class MainActivity extends Activity {
         // 状态是实时轮询来的，缓存只会让人看到旧的一眼。
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
 
+        // 剪贴板桥（只读，给「从剪贴板」按钮用）。
+        // 必须在 loadUrl 之前加：加晚了在部分 WebView 版本上要刷新页面才注入，
+        // 表现是"第一次打开点了没反应，退出去再进就好了"——最难查的那种。
+        web.addJavascriptInterface(new ClipBridge(), BRIDGE_NAME);
+
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
@@ -195,6 +212,70 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
+    }
+
+    /**
+     * 返回键 —— 也包括手机的**侧边滑动返回手势**（它最终就是走这个回调）。
+     *
+     * 规则只有一条：**网页还能往回退，就先让网页退**。
+     * 网页用 `history.pushState` 记着自己在第几层（大图 → 结果页 → 首页），
+     * 所以这一句就让侧滑能关掉大图、退回上一页；等网页退到底了
+     * （`canGoBack()` 为假）才真的退出 App。
+     *
+     * ⚠ 不写这个的后果很具体：侧滑永远直接退回桌面。那偏偏是手机上最顺手的
+     * 一个操作，一做就把 App 关掉 —— 用户第一轮反馈的就是这条。
+     *
+     * 与网页的约定：**凡是能让用户"进去"的地方，网页那边都要 pushState**，
+     * 否则那一步侧滑就会穿透到底（这条写在 webui.py 的文档头里，测试也钉着）。
+     */
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (web != null && web.canGoBack()) {
+            web.goBack();
+            return;
+        }
+        super.onBackPressed();          // 已经在最外层：正常退出
+    }
+
+    // ──────────────────────────── 剪贴板桥 ────────────────────────────
+
+    /**
+     * 给网页里「从剪贴板」按钮用的**只读**桥。
+     *
+     * 只暴露一个 `read()`：把剪贴板里的纯文本和 HTML 一起交出去，仅此而已 ——
+     * 不写文件、不执行命令、不碰网络。网页是从 127.0.0.1 加载的自家页面，
+     * 而且外链一律交给系统浏览器打开（见 shouldOverrideUrlLoading），
+     * 所以这个桥不会被别的页面碰到。
+     *
+     * ⚠ 方法必须标 `@JavascriptInterface` —— API 17 起只有标了的才暴露给 JS。
+     * 忘了标的表现是"点了没反应"，而且**一点报错都没有**。
+     */
+    private class ClipBridge {
+        @JavascriptInterface
+        public String read() {
+            JSONObject out = new JSONObject();
+            try {
+                ClipboardManager cm =
+                        (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData clip = cm == null ? null : cm.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    ClipData.Item item = clip.getItemAt(0);
+                    CharSequence text = item.coerceToText(MainActivity.this);
+                    out.put("text", text == null ? "" : text.toString());
+                    // 浏览器里复制的网页会带一份 HTML，正文里的图片地址就在里面
+                    CharSequence html = item.getHtmlText();
+                    if (html != null) {
+                        out.put("html", html.toString());
+                    }
+                }
+            } catch (Throwable t) {
+                // 有的 ROM 在应用没有焦点时读剪贴板会抛。读不到就当空的，
+                // 绝不能因为"读剪贴板失败"把整个界面弄崩。
+                return "{}";
+            }
+            return out.toString();
+        }
     }
 
     /** 起本地服务，好了就加载页面。失败则留在遮罩上并写清原因。 */

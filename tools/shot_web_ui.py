@@ -106,27 +106,29 @@ def shot(chrome, url, name, budget=60000):
 
 
 def inject_prepare(action):
-    """注入一段"准备"脚本：强制缩略图立即加载，加载完再执行 action。
+    """注入一段"准备"脚本：等网格画出来，再执行 action。
 
-    为什么需要：页面用的是 `loading="lazy"`（手机上几十张图必须懒加载，这是对的），
-    但无头 + 虚拟时间的环境里 IntersectionObserver 不触发 —— 实测图片请求
-    **一条都没发出**，网格里全是"没下下来"的占位。所以在截图前把 lazy 改成
-    eager 并重新赋一次 src。这只影响截图工具内存里的那份页面，不碰产品代码。
+    为什么等的是 `.tile` 而不是图片加载完：这个内核**不加载图片**（见文件头
+    的已知限制），`img.complete` 永远是假 —— 上一版等的就是它，
+    结果大图那一步永远等不到，拍出来跟结果页一模一样（两份文件字节都相同）。
+    格子是 JS 画的，不依赖图片下载，出现即代表"页面状态已就绪"。
+
+    另外顺手把 `loading="lazy"` 改成 eager：在有完整内核的机器上，
+    这样能拍到真的缩略图；在这个内核上没有任何效果，但也不碍事。
     """
     inject(
         "window.addEventListener('load',function(){"
-        "var tries=0,done=false;"
+        "var tries=0;"
         "var t=setInterval(function(){"
-        "  tries++;"
-        "  var ims=document.querySelectorAll('#grid img');"
-        "  for(var k=0;k<ims.length;k++){"
-        "    if(ims[k].getAttribute('loading')!=='eager'){"
-        "      ims[k].setAttribute('loading','eager');ims[k].src=ims[k].src;"
-        "    }}"
-        "  }"
-        "  if((ims.length&&ims[0].complete)||tries>300){"
-        "    if(!done){done=true;clearInterval(t);" + action + "}"
-        "  }},150);});")
+        "tries++;"
+        "var ims=document.querySelectorAll('#grid img');"
+        "for(var k=0;k<ims.length;k++){"
+        "if(ims[k].getAttribute('loading')!=='eager'){"
+        "ims[k].setAttribute('loading','eager');ims[k].src=ims[k].src;"
+        "}}"
+        "if(document.querySelectorAll('#grid .tile').length||tries>200){"
+        "clearInterval(t);" + action +
+        "}},150);});")
 
 
 def inject(js):
@@ -134,7 +136,16 @@ def inject(js):
 
     每次都从**原始页面**拼，不是在上一份注入的基础上再拼 ——
     否则拍第三张时会把第一张的注入脚本也带上（大图页会莫名其妙自己弹出来）。
+
+    ⚠ 花括号必须配对，这里当场查：这批脚本全是手工拼的字符串，
+    少写/多写一个 `}` 就是整段语法错误 —— 浏览器**一声不吭地扔掉**，
+    表现是"注入的步骤永远不发生"，跟"页面没加载好"长得一模一样
+    （大图那张怎么拍都是结果页，排查了一圈内核限制，最后发现是自己括号多了）。
     """
+    a, b = js.count('{'), js.count('}')
+    if a != b:
+        raise RuntimeError(f'注入的脚本花括号不配对：{{ {a} 个、}} {b} 个 —— '
+                           '整段会被当成语法错误扔掉，先修这里再拍')
     webui.PAGE = ORIG_PAGE.replace('</body>', f'<script>{js}</script></body>')
 
 
@@ -142,6 +153,21 @@ def wait_ready(timeout=20):
     end = time.time() + timeout
     while time.time() < end:
         if web.engine().state()['phase'] in ('ready', 'saved', 'error'):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def wait_check(timeout=30):
+    """等小图体检跑完 —— 它是解析之后在后台接着跑的。
+
+    不等的话，截图里可能一张「小」标都没有（还没量到），
+    看着像是功能没生效，其实是没等够。
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        c = web.engine().state()['check']
+        if not c['running'] and c['done']:
             return True
         time.sleep(0.1)
     return False
@@ -162,7 +188,13 @@ def main():
 
     tmp = tempfile.mkdtemp()
     try:
-        fake = T.FakeGet(pages={T.ARTICLE_URL: T.article()})
+        # 三张图：两张正常大小、一张明显偏小 —— 这样截图里能一眼看到
+        # 「小」标记、自动不勾选、以及顶部那句"已自动跳过 1 张小图"。
+        # ⚠ 匹配键用"文件号"那一段（适配器会把查询串剥掉），见 test_apk_web 里的注释。
+        fake = T.FakeGet(pages={T.ARTICLE_URL: T.article((T.PIC_A, T.PIC_B, T.PIC_T))},
+                         sizes={'AAAAAAAABBBBCCCC': (T.BIG_A, T.BIG_A),
+                                'DDDDDDDDEEEEFFFF': (T.BIG_A, T.BIG_A),
+                                'TINYTINYTINY': (T.TINY_T, T.TINY_T)})
         album = T.FakeAlbum(os.path.join(tmp, 'album'))
         port = web.start(root=tmp, version='1.10.0', get=fake, publish=album)
         base = f'http://127.0.0.1:{port}'
@@ -170,15 +202,17 @@ def main():
 
         ok = True
 
-        # ① 首页：还没解析，空态
+        # ① 首页：还没解析，空态（含两个偏好开关）
         ok &= shot(chrome, base + '/', '01_首页空态.png')
 
-        # ② 结果页：先在服务端把文章解析好，页面一进来就是"找到 2 张图"，
+        # ② 结果页：先在服务端把文章解析好，页面一进来就是"找到 3 张图"，
         #    并强制缩略图立即加载（无头环境不触发懒加载，见 inject_prepare）
         web.engine().parse(T.TITLE + '\n' + T.ARTICLE_URL)
         if not wait_ready():
             print('❌ 解析没在预期时间内完成')
             return 1
+        if not wait_check():
+            print('⚠ 小图体检没在预期时间内跑完（截图里可能看不到「小」标）')
         inject_prepare('')
         ok &= shot(chrome, base + '/', '02_结果网格.png')
 

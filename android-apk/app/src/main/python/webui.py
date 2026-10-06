@@ -12,8 +12,28 @@ Chaquopy 把 Python 源码打进 APK 后，"源码同目录的文件运行时还
 
 交互约定：
   · 点缩略图 = 看大图（手机上的直觉）；点右上角圆圈 = 勾选/取消勾选
+  · 大图左右滑动 = 翻上/下一张（放大状态下改成平移，不翻页）
   · 底部常驻条 = 全选 / 已选张数 / 保存到相册
   · 分享进来会**自动解析**，抓完停在结果页让你确认再入库（不直接写相册）
+
+────────────────────────────────────────────────────────────────────────
+返回键：页面自己管好"层级"
+────────────────────────────────────────────────────────────────────────
+系统的侧边滑动返回最终落到 Activity 的返回键，那边只做一件事：
+**WebView 能回退就回退**。所以这里的 `history.pushState` 就是返回层级本身 ——
+页面 push 了几层，返回手势就能退几层（关大图 → 回首页/历史页），
+退到最外层再划一次才退出 App。
+
+这条规定值得写在最显眼的地方：**凡是用户能"进去"的地方，都要 push 一层**，
+否则从那里侧滑就直接退回桌面 —— 手机上的第一直觉操作变成"退出应用"，
+是最容易被骂的那种 bug。
+
+────────────────────────────────────────────────────────────────────────
+剪贴板
+────────────────────────────────────────────────────────────────────────
+「从剪贴板」走 Java 侧注入的只读 JS 桥（`window.imgsnag.read`），
+拿回 `{text, html}` 一起交给后端，由后端决定用哪份（见 imgsnag_web.pick_source）。
+桥不存在（电脑上直接用浏览器打开页面）时按钮给一句人话，而不是静默失效。
 """
 
 PAGE = r'''<!DOCTYPE html>
@@ -84,6 +104,25 @@ input[type=url],input[type=text]{
 input::placeholder{color:var(--sub)}
 .mt{margin-top:10px}
 
+/* ── 开关 ── */
+.setrow{display:flex; align-items:center; gap:12px; padding:9px 0}
+.setrow + .setrow{border-top:1px solid var(--line)}
+.setrow label{flex:1; min-width:0}
+.sett{display:block; font-size:15px}
+.setd{display:block; font-size:12.5px; color:var(--sub); margin-top:2px}
+.sw{
+  appearance:none; -webkit-appearance:none; flex:0 0 auto;
+  width:48px; height:29px; margin:0; border-radius:15px;
+  background:var(--line); position:relative; transition:background .18s;
+}
+.sw::after{
+  content:''; position:absolute; top:3px; left:3px; width:23px; height:23px;
+  border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.25);
+  transition:transform .18s;
+}
+.sw:checked{background:var(--accent)}
+.sw:checked::after{transform:translateX(19px)}
+
 /* ── 状态条 ── */
 #status{display:none; margin:0 0 10px; padding:11px 13px; border-radius:12px;
   background:var(--card); border:1px solid var(--line); font-size:13.5px;
@@ -97,9 +136,11 @@ input::placeholder{color:var(--sub)}
   animation:slide 1.1s linear infinite}
 @keyframes slide{from{transform:translateX(-100%)}to{transform:translateX(340%)}}
 #bar2.det i{width:0; animation:none; transition:width .25s}
+#checkLine{font-size:12.5px; color:var(--sub); margin:8px 0 0}
 
 /* ── 缩略图网格 ── */
-#grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:7px}
+#grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:7px;
+      margin-top:10px}
 .tile{
   position:relative; aspect-ratio:1/1; border-radius:11px; overflow:hidden;
   background:var(--line); border:2.5px solid transparent;
@@ -111,6 +152,12 @@ input::placeholder{color:var(--sub)}
 .tile .no{
   position:absolute; left:5px; bottom:5px; font-size:11px; padding:0 5px;
   border-radius:6px; background:rgba(0,0,0,.55); color:#fff;
+}
+/* 体检出来"偏小"的图：默认不勾选，但一眼能看出为什么 */
+.tile.mini::after{
+  content:'小'; position:absolute; left:5px; top:5px;
+  font-size:10.5px; line-height:1.5; padding:0 5px; border-radius:6px;
+  background:rgba(201,138,0,.9); color:#fff;
 }
 .tile .ck{
   position:absolute; right:4px; top:4px; width:30px; height:30px;
@@ -157,6 +204,16 @@ input::placeholder{color:var(--sub)}
       align-items:center; justify-content:center}
 #vimg.fit{max-width:100%; max-height:100%; object-fit:contain}
 #vimg.full{max-width:none; max-height:none}
+/* 左右翻页按钮：手机上滑动为主，这是给"够不到/习惯点"的人留的 */
+.vnav{
+  position:absolute; top:50%; transform:translateY(-50%); z-index:2;
+  width:40px; height:78px; padding:0; border:0; border-radius:12px;
+  background:rgba(255,255,255,.14); color:#fff; font-size:26px; line-height:1;
+  opacity:.6;
+}
+.vnav:active{opacity:1; background:rgba(255,255,255,.3)}
+#vPrev{left:6px}
+#vNext{right:6px}
 
 /* ── 日志 ── */
 details{margin-top:14px; border-top:1px solid var(--line); padding-top:10px}
@@ -185,15 +242,36 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
       <p class="hint">
         <b>最简单的用法：</b>在微信里打开文章 → 右上角 <b>…</b> → 分享 → 选 <b>ImgSnag</b>，
         会自动开始抓图。<br>
-        也可以把文章链接粘贴到下面。
+        也可以把文章链接粘贴到下面，或在浏览器里复制正文后点「从剪贴板」。
       </p>
       <input id="url" type="url" inputmode="url" autocomplete="off" autocapitalize="off"
              spellcheck="false" placeholder="https://mp.weixin.qq.com/s/...">
       <div class="row mt">
+        <button class="btn" id="doPaste">从剪贴板</button>
         <button class="btn primary" id="doParse">解析图片</button>
-        <button class="btn" id="clear">清空</button>
+      </div>
+      <div class="row mt">
+        <button class="btn block" id="clear">清空输入框</button>
       </div>
     </div>
+
+    <div class="card mt">
+      <div class="setrow">
+        <label for="setOriginal">
+          <span class="sett">保存原图</span>
+          <span class="setd">关掉则存压缩档，省流量</span>
+        </label>
+        <input type="checkbox" class="sw" id="setOriginal">
+      </div>
+      <div class="setrow">
+        <label for="setSkipTiny">
+          <span class="sett">自动跳过小图</span>
+          <span class="setd">表情、二维码这类小图默认不勾选</span>
+        </label>
+        <input type="checkbox" class="sw" id="setSkipTiny">
+      </div>
+    </div>
+
     <p class="hint" style="margin:14px 2px 0" id="foot"></p>
   </section>
 
@@ -201,6 +279,7 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
   <section id="view-result" hidden>
     <div id="status"></div>
     <div id="bar2" hidden><i></i></div>
+    <p id="checkLine" hidden></p>
     <div id="grid"></div>
     <div id="gridEmpty" class="empty" hidden>还没有可用的图</div>
     <details>
@@ -233,6 +312,8 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
     <button class="tb" id="vSave">存这张</button>
   </div>
   <div id="vbody"><img id="vimg" class="fit" alt=""></div>
+  <button class="vnav" id="vPrev" title="上一张">‹</button>
+  <button class="vnav" id="vNext" title="下一张">›</button>
 </div>
 
 <div id="toast" hidden></div>
@@ -241,8 +322,16 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
 'use strict';
 var $ = function(s){ return document.querySelector(s); };
 var st = {phase:'idle'};
-var view = 'home', sid = '', sel = new Set(), lastShare = '', lastPhase = '';
+var view = 'home', sid = '', sel = new Set(), tiny = new Set();
+var lastShare = '', lastPhase = '';
 var vIndex = 0, vFit = true;
+/* 用户有没有自己动过勾选。动过之后就不再"自动全选" ——
+   否则体检每报出一张小图就把用户的选择重算一遍，
+   表现是"我刚取消的勾选又自己回来了"。 */
+var autoSel = true;
+/* 用户动过开关之后，不再用轮询回来的设置覆盖界面上的开关状态：
+   轮询可能比刚才那次提交晚一拍，会把开关拨回去，看着像"点了没用"。 */
+var settingsTouched = false;
 
 /* ── 与后端说话 ── */
 function api(path, body){
@@ -271,8 +360,10 @@ function toast(msg){
   toastTimer = setTimeout(function(){ t.hidden = true; }, 2600);
 }
 
-/* ── 顶栏 ── */
-function setView(v){
+/* ── 视图与返回栈 ── */
+/* paintView = 只画；setView = 画 + 压一层返回栈。
+   系统返回手势能不能用，全看这里有没有老老实实 push。 */
+function paintView(v){
   view = v;
   $('#view-home').hidden = v !== 'home';
   $('#view-result').hidden = v !== 'result';
@@ -283,16 +374,32 @@ function setView(v){
   $('#topTitle').textContent = v === 'history' ? '下载历史'
     : (v === 'result' ? (st.title || '抓取结果') : 'ImgSnag');
 }
+function setView(v, opts){
+  if (!(opts && opts.fromPop) && v !== view){
+    history.pushState({view:v}, '', '#' + v);
+  }
+  paintView(v);
+}
+window.addEventListener('popstate', function(e){
+  // 返回：先把最上层的弹层关掉，再退视图。
+  // e.state 是"弹出之后"那一条 —— 也就是打开弹层之前的状态。
+  closeViewer(true);
+  var v = (e.state && e.state.view) || 'home';
+  paintView(v);
+  if (v === 'history') loadHistory();
+});
+// 栈底那一条换成我们自己的，免得后退退到 WebView 的初始条目上
+history.replaceState({view:'home'}, '', '#home');
 
-$('#back').onclick = function(){ setView('home'); };
+$('#back').onclick = function(){ history.back(); };
 $('#goHistory').onclick = function(){ setView('history'); loadHistory(); };
 
 /* ── 首页 ── */
-function startParse(text){
-  var src = text || $('#url').value.trim();
-  if (!src){ toast('先粘贴文章链接'); return Promise.resolve({ok:false}); }
-  return api('/api/parse', {source:src}).then(function(r){
-    if (r.state) applyState(r.state);
+function startParse(text, html){
+  var src = (text === undefined || text === null) ? $('#url').value.trim() : text;
+  if (!src && !html){ toast('先粘贴文章链接'); return Promise.resolve({ok:false}); }
+  return api('/api/parse', {source:src, html:html || ''}).then(function(r){
+    if (r && r.state) applyState(r.state);
     return r;
   });
 }
@@ -302,8 +409,55 @@ $('#url').onkeydown = function(e){
   if (e.key === 'Enter'){ e.preventDefault(); $('#url').blur(); startParse(); }
 };
 
+/* 剪贴板：Java 侧注入的只读桥。浏览器里直接开这个页面时桥不存在，
+   这时给一句人话（而不是点了没反应）。 */
+function readClipboard(){
+  try{
+    if (window.imgsnag && window.imgsnag.read){
+      return JSON.parse(window.imgsnag.read());
+    }
+  }catch(e){ /* 桥坏了就当没有桥 */ }
+  return null;
+}
+$('#doPaste').onclick = function(){
+  var c = readClipboard();
+  if (!c){ toast('这个按钮要在 App 里用；浏览器里请直接粘到上面'); return; }
+  var text = (c.text || '').trim(), html = c.html || '';
+  if (!text && !html){ toast('剪贴板里没有内容'); return; }
+  // 短的才回填输入框；整页源码写进去只会让人一脸问号
+  if (text.length && text.length <= 200) $('#url').value = text;
+  startParse(text, html).then(function(r){
+    if (r && r.ok === false) toast('现在不能解析：' + (r.state ? r.state.message : ''));
+  });
+};
+
+/* ── 设置 ── */
+function applySettings(s){
+  st.settings = s || {};
+  if (!settingsTouched){
+    $('#setOriginal').checked = !!st.settings.original;
+    $('#setSkipTiny').checked = !!st.settings.skip_tiny;
+  }
+}
+function bindSwitch(id, key){
+  $('#' + id).onchange = function(){
+    var patch = {};
+    patch[key] = this.checked;
+    settingsTouched = true;
+    var box = this;
+    api('/api/settings', patch).then(function(r){
+      if (r && r.settings) applySettings(r.settings);
+      // 自动全选状态下的勾选要跟着新设置重算
+      if (autoSel) paintBar();
+    });
+  };
+}
+bindSwitch('setOriginal', 'original');
+bindSwitch('setSkipTiny', 'skip_tiny');
+
 /* ── 结果页 ── */
 $('#allBtn').onclick = function(){
+  autoSel = false;
   if (sel.size >= st.count){ sel.clear(); }
   else { sel.clear(); for (var i = 1; i <= st.count; i++) sel.add(i); }
   paintTiles(); paintBar();
@@ -344,6 +498,7 @@ function buildGrid(){
     ck.onclick = function(e){
       e.stopPropagation();
       var n = parseInt(this.parentNode.dataset.i, 10);
+      autoSel = false;
       if (sel.has(n)) sel.delete(n); else sel.add(n);
       paintTiles(); paintBar();
     };
@@ -359,6 +514,7 @@ function paintTiles(){
   for (var k = 0; k < tiles.length; k++){
     var n = parseInt(tiles[k].dataset.i, 10);
     tiles[k].classList.toggle('on', sel.has(n));
+    tiles[k].classList.toggle('mini', tiny.has(n));
   }
 }
 function paintBar(){
@@ -369,6 +525,19 @@ function paintBar(){
     : ('保存到相册' + (st.phase === 'saved' ? '（再存）' : ''));
   $('#allBtn').textContent = (st.count && sel.size >= st.count) ? '全不选' : '全选';
 }
+function paintCheck(){
+  var c = st.check || {};
+  var el = $('#checkLine');
+  if (c.running && c.total){
+    el.hidden = false;
+    el.textContent = '正在认小图 ' + c.done + '/' + c.total + '…';
+  } else if (tiny.size){
+    el.hidden = false;
+    el.textContent = '已自动跳过 ' + tiny.size + ' 张小图，想存就把它们勾上';
+  } else {
+    el.hidden = true;
+  }
+}
 
 /* ── 看大图 ── */
 function openViewer(i){
@@ -378,14 +547,40 @@ function openViewer(i){
   vFit = true;
   $('#vpos').textContent = i + ' / ' + st.count;
   $('#vPick').textContent = sel.has(i) ? '取消勾选' : '勾选';
+  // 只有一张时不给翻页按钮，免得点了没反应
+  $('#vPrev').hidden = st.count <= 1;
+  $('#vNext').hidden = st.count <= 1;
   $('#viewer').hidden = false;
+  // 进大图 = 压一层。这样侧滑返回是"关掉大图"而不是"退回桌面"
+  history.pushState({view:view, viewer:i}, '', '');
 }
-$('#vClose').onclick = function(){ $('#viewer').hidden = true; $('#vimg').src = ''; };
+/* byPop=true 表示"已经在返回的路上了"，只负责收拾界面。
+   不传则是用户主动关：交给 history.back() 走同一条返回路径 ——
+   两条路合一，就不会出现"点关闭能关、侧滑返回关不掉"这种不一致。 */
+function closeViewer(byPop){
+  if ($('#viewer').hidden) return;
+  if (!byPop){ history.back(); return; }
+  $('#viewer').hidden = true;
+  $('#vimg').src = '';
+  $('#vimg').className = 'fit';
+  vFit = true;
+}
+function step(d){
+  var n = vIndex + d;
+  if (n < 1){ toast('已经是第一张了'); return; }
+  if (n > st.count){ toast('已经是最后一张了'); return; }
+  openViewer(n);
+}
+$('#vClose').onclick = function(){ closeViewer(); };
+$('#vPrev').onclick = function(){ step(-1); };
+$('#vNext').onclick = function(){ step(1); };
 $('#vimg').onclick = function(){
+  if (swallowClick){ swallowClick = false; return; }
   vFit = !vFit;
   this.className = vFit ? 'fit' : 'full';
 };
 $('#vPick').onclick = function(){
+  autoSel = false;
   if (sel.has(vIndex)) sel.delete(vIndex); else sel.add(vIndex);
   paintTiles(); paintBar();
   this.textContent = sel.has(vIndex) ? '取消勾选' : '勾选';
@@ -393,11 +588,48 @@ $('#vPick').onclick = function(){
 $('#vSave').onclick = function(){
   api('/api/save', {idxs:[vIndex]}).then(function(r){
     if (r.state) applyState(r.state);
-    $('#viewer').hidden = true;
+    closeViewer();
     if (!r.ok) toast('现在不能保存');
     else toast('正在保存第 ' + vIndex + ' 张…');
   });
 };
+
+/* ── 左右滑动翻页 ──
+   只在"没放大"时翻页：放大之后手指是在平移图片，翻页会让人抓狂。
+   判定用"走得够远 + 以横向为主 + 不太慢"，短促的点按仍然算点击（切适应/原大小）。 */
+var tStart = null, swallowClick = false;
+function onDown(x, y){
+  tStart = {x:x, y:y, t:Date.now()};
+  swallowClick = false;
+}
+function onUp(x, y){
+  var s = tStart;
+  tStart = null;
+  if (!s) return;
+  var dx = x - s.x, dy = y - s.y, dt = Date.now() - s.t;
+  if (dt > 800 || Math.abs(dx) < 45) return;
+  if (Math.abs(dx) < Math.abs(dy) * 1.2) return;
+  if (!vFit){ swallowClick = true; return; }
+  swallowClick = true;
+  step(dx < 0 ? 1 : -1);
+}
+$('#vbody').addEventListener('touchstart', function(e){
+  var t = e.touches[0];
+  if (t) onDown(t.clientX, t.clientY);
+}, {passive:true});
+$('#vbody').addEventListener('touchend', function(e){
+  var t = e.changedTouches[0];
+  if (t) onUp(t.clientX, t.clientY);
+}, {passive:true});
+$('#vbody').addEventListener('touchcancel', function(){ tStart = null; }, {passive:true});
+$('#vbody').addEventListener('mousedown', function(e){ onDown(e.clientX, e.clientY); });
+$('#vbody').addEventListener('mouseup', function(e){ onUp(e.clientX, e.clientY); });
+document.addEventListener('keydown', function(e){
+  if ($('#viewer').hidden) return;
+  if (e.key === 'ArrowLeft') step(-1);
+  else if (e.key === 'ArrowRight') step(1);
+  else if (e.key === 'Escape') closeViewer();
+});
 
 /* ── 历史 ── */
 function loadHistory(){
@@ -464,16 +696,18 @@ function applyState(s){
   var changed = (p !== lastPhase);
   lastPhase = p;
 
-  if (changed && p !== 'idle') setView('result');
+  tiny = new Set(s.tiny || []);
+  applySettings(s.settings || {});
 
-  if (changed){
-    if (p === 'parsing' || (p === 'ready' && s.sid !== sid)){
-      // 新会话：默认全选
-      if (s.sid !== sid) sel.clear();
-      sid = s.sid || sid;
-    }
-    if (p === 'saved') toast(s.message || '已保存');
+  // 换了文章（含"从历史打开另一次"）：重开一次自动选择
+  if (s.sid !== sid){
+    sid = s.sid || sid;
+    autoSel = true;
+    sel = new Set();
   }
+
+  if (changed && p !== 'idle') setView('result');
+  if (changed && p === 'saved') toast(s.message || '已保存');
 
   var status = $('#status');
   status.className = 'show ' + (p === 'error' ? 'err'
@@ -496,19 +730,28 @@ function applyState(s){
   if (view === 'result'){
     if (s.sid && s.sid !== $('#grid').dataset.sid){
       $('#grid').dataset.sid = s.sid;
+      $('#grid').dataset.count = s.count;
       buildGrid();
     } else if (s.count !== Number($('#grid').dataset.count || -1)){
       $('#grid').dataset.count = s.count;
       buildGrid();
     }
-    // 新会话时把默认选中补上
-    if (s.phase === 'ready' || s.phase === 'saving' || s.phase === 'saved'){
-      if (!sel.size && s.count && !$('#grid').dataset.touched){
-        for (var i = 1; i <= s.count; i++) sel.add(i);
-        paintTiles();
+    // 自动选择：跟着"小图清单"走 —— 体检每认出一张，它就自己从勾选里掉出去。
+    // 后端在过滤关掉时会给空表，所以这里不重复判一次开关
+    // （同一件事两处判，迟早会不一致，而且不一致时两边都不报错）。
+    if (autoSel && s.count
+        && (p === 'ready' || p === 'saving' || p === 'saved')){
+      var next = new Set();
+      for (var i = 1; i <= s.count; i++){
+        if (tiny.has(i)) continue;
+        next.add(i);
       }
-      paintBar();
+      var same = (next.size === sel.size);
+      if (same){ next.forEach(function(v){ if (!sel.has(v)) same = false; }); }
+      if (!same){ sel = next; paintTiles(); }
     }
+    paintBar();
+    paintCheck();
     $('#topTitle').textContent = s.title || '抓取结果';
   }
 
@@ -543,13 +786,14 @@ function tick(){
       }
     }
 
-    var running = (s.phase === 'parsing' || s.phase === 'saving');
+    var running = (s.phase === 'parsing' || s.phase === 'saving'
+                   || (s.check && s.check.running));
     clearTimeout(busyTimer);
     busyTimer = setTimeout(tick, running ? 450 : 1200);
   });
 }
 
-setView('home');
+paintView('home');
 refresh();
 tick();
 </script>
