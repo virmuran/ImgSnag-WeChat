@@ -493,6 +493,26 @@ def test_workflow():
     for p in ('android-apk/**', 'web_image_dl/**', 'android/sync_core.py', 'version.py'):
         check(f"'{p}'" in wf, f'改动 {p} 时会触发构建')
 
+    # 真·YAML 解析 —— GitHub 只在推送之后才报语法错，等一次要几分钟。
+    # pyyaml 装了就严格解析；没装则退回「顶层键」兜底检查。
+    # （曾翻车：release 说明整段顶到行首，把 run: | 的字面块提前掐断，
+    #   '**下载…' 被 YAML 当成语法节点 → 推上 GitHub 才炸。）
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        try:
+            yaml.safe_load(wf)
+            check(True, '工作流是合法的 YAML')
+        except yaml.YAMLError as e:
+            check(False, f'工作流 YAML 解析失败：{str(e).splitlines()[0][:120]}')
+    else:
+        bad = [ln[:40] for ln in wf.split('\n')
+               if ln.strip() and not ln.startswith((' ', '#'))
+               and not re.match(r'^(name|on|permissions|concurrency|jobs):', ln)]
+        check(not bad, f'顶层只能放合法键，顶到行首的可疑行：{bad}')
+
 
 def test_docs():
     print('[16] 说明文档')

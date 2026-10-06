@@ -75,8 +75,11 @@ jobs:
       # 先跑一遍本地就能跑的那部分测试。它会在几秒内拦住两类问题：
       # 副本忘了同步（APK 里会是旧规则）、Python 桥接层被改坏。
       # 比等五分钟打包完才发现划算得多。
+      # pyyaml 让测试能连工作流文件本身的语法一起校验（失败也不拦路）。
       - name: 快速自检（副本同步 + 桥接层）
-        run: python3 tests/test_apk_app.py
+        run: |
+          python3 -m pip install --user pyyaml -q 2>/dev/null || true
+          python3 tests/test_apk_app.py
 
       - name: 接受 SDK 许可并补齐所需组件
         run: |
@@ -169,15 +172,15 @@ jobs:
             --prerelease \
             --notes "由 GitHub Actions 自动构建，每次推送更新。
 
-**下载下面这个 .apk 文件**，传到手机点击安装即可（小米/红米需在弹窗里允许「安装未知应用」）。
+          **下载下面这个 .apk 文件**，传到手机点击安装即可（小米/红米需在弹窗里允许「安装未知应用」）。
 
-| 项目 | 值 |
-|---|---|
-| 版本 | v${{ steps.pack.outputs.version }} |
-| 架构 | arm64-v8a（红米 K80 等主流手机） |
-| 系统要求 | Android 10 及以上 |
-| 提交 | \`${{ github.sha }}\` |
+          | 项目 | 值 |
+          |---|---|
+          | 版本 | v${{ steps.pack.outputs.version }} |
+          | 架构 | arm64-v8a（红米 K80 等主流手机） |
+          | 系统要求 | Android 10 及以上 |
+          | 提交 | \`${{ github.sha }}\` |
 
-只申请了「网络访问」一个权限；图片存到相册的 \`Pictures/ImgSnagWeChat/\` 下。
+          只申请了「网络访问」一个权限；图片存到相册的 \`Pictures/ImgSnagWeChat/\` 下。
 
-> 这是个**预发布**草稿位，只为方便下载，不是正式版本发布。"
+          > 这是个**预发布**草稿位，只为方便下载，不是正式版本发布。"
