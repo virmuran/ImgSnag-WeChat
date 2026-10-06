@@ -172,7 +172,14 @@ public class MainActivity extends Activity {
     /** 全部跑在后台线程：Python 抓图 → 搬进相册。返回要显示给用户的整段文本。 */
     private String snagAndPublish(String raw) {
         Context app = getApplicationContext();
-        File workRoot = new File(app.getFilesDir(), PENDING_DIR);
+        // Python 的约定：给它一个**根目录**，它自己在底下建 pending/<文章文件夹>/。
+        // 所以传给 Python 的是 filesDir 根（下面用 scratch），而扫描/清理用的
+        // workRoot 是它底下的 pending 那一层。
+        // 如果把 workRoot 直接传给 Python，路径会嵌成 pending/pending/…，
+        // 扫描时内层 pending 被当成"文章文件夹"，里面全是文件夹没有图 ——
+        // 表现是「共 N 张…没有新图片可入库」，两边都不报错（真机首跑踩过）。
+        File scratch = app.getFilesDir();
+        File workRoot = new File(scratch, PENDING_DIR);
 
         // ── ① Python 抓图 ──
         String report;
@@ -183,7 +190,7 @@ public class MainActivity extends Activity {
                 Python.start(new AndroidPlatform(app));
             }
             PyObject mod = Python.getInstance().getModule("imgsnag_android");
-            PyObject out = mod.callAttr("snag_text", raw, workRoot.getAbsolutePath());
+            PyObject out = mod.callAttr("snag_text", raw, scratch.getAbsolutePath());
             report = out == null ? "(Python 没有返回任何内容)" : out.toString();
         } catch (Throwable t) {
             // 这里必须兜住 Throwable 而不是 Exception：Python 侧的语法/导入错误

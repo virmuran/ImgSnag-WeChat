@@ -7,9 +7,11 @@
 # 公开仓库还免费用、不限量。所以这里一行 apt 都不用装。
 #
 # ── 怎么用 ──
-#   自动：往 main 分支推送、且改动涉及 android-apk/ 或本文件时自动跑
+#   日常：往 main 分支推送、且改动涉及 android-apk/ 或本文件时自动跑，
+#         APK 挂到 Releases 的 apk-latest（滚动预发布位，永远只有"最新"一个答案）
+#   发版：在 GitHub 上 Publish 一个正式版本 Release（vX.Y.Z，先传好 exe 和便携 zip）——
+#         本工作流会自动给这个 Release 补上 APK，三种形态并排出现
 #   手动：仓库页面 → Actions → 左侧 "Build Android APK" → Run workflow
-# 跑完在 Actions 里能下 zip 产物，也会自动挂到 Releases 的 apk-latest 上。
 #
 # ── 为什么自己下载 Gradle ──
 # Chaquopy 17.0.0 官方配套的是 Gradle 8.13，版本不对会报很难懂的错。
@@ -28,6 +30,8 @@ on:
       - 'android/sync_core.py'
       - 'version.py'
       - '.github/workflows/build-apk.yml'
+  release:
+    types: [published]             # 正式发版时，把 APK 补进同一个 Release
 
 permissions:
   contents: write                  # 需要它才能把 APK 挂到 Release
@@ -39,6 +43,9 @@ concurrency:
 
 jobs:
   build:
+    # 防套娃：apk-latest 是本工作流自己发布的预发布位，
+    # 如果哪天它被手动 Publish，不能再触发一轮"给它发版"
+    if: github.event_name != 'release' || github.event.release.tag_name != 'apk-latest'
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -197,3 +204,14 @@ jobs:
           只申请了「网络访问」一个权限；图片存到相册的 \`Pictures/ImgSnagWeChat/\` 下。
 
           > 这是个**预发布**草稿位，只为方便下载，不是正式版本发布。"
+
+      # 正式发版（Publish 一个 vX.Y.Z 的 Release，exe 和便携 zip 已在里面）时触发：
+      # 把刚构建好的 APK 也塞进同一个 Release —— 三种形态并排，下载入口永远只有那一页。
+      - name: 把 APK 补进本次版本 Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" "${{ steps.pack.outputs.apk }}" --clobber
+          echo "已把 ${{ steps.pack.outputs.apk }} 附加到 Release $TAG"

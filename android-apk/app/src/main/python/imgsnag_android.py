@@ -37,9 +37,14 @@ Chaquopy 把 `ssl` 配成使用它打包进去的 certifi 根证书库，**不�
 ────────────────────────────────────────────────────────────────────────
 和中转目录的约定（与 Java 侧握手的地方）
 ────────────────────────────────────────────────────────────────────────
-Python 把图下到 `<workdir>/<文章文件夹>/img_01.jpg`，然后**由 Java 搬进系统相册**
-（写相册要走 MediaStore，是安卓平台特有的活）。这个 `<workdir>/` 由 Java 传入，
-本模块不假设任何固定路径 —— 所以测试可以在 Windows 上原地跑完整条链路。
+Python 把图下到 `<workdir>/pending/<文章文件夹>/img_01.jpg`，然后**由 Java 搬进
+系统相册**（写相册要走 MediaStore，是安卓平台特有的活）。
+
+`<workdir>` 由 Java 传入 —— ⚠ 传的是**根目录**（应用的 filesDir），
+`pending/` 这一层由本模块自己建（名字就是下面的 PENDING_DIR_NAME）。
+Java 侧扫描与清理的正是同一个 pending 层。要是 Java 把 pending 层本身当成
+workdir 传进来，路径会嵌成 pending/pending/…，表现是"图抓到了但相册里没有"，
+两边都不报错 —— 所以测试把这条约定钉死在两边。
 """
 from __future__ import annotations
 
@@ -242,7 +247,8 @@ def build_report(res, lines, retried=False) -> str:
 def snag_text(text, workdir, get=None):
     """从一段文本（分享内容 / 剪贴板 / 裸链接）抓取图片，返回给人看的报告。
 
-    图片落在 `<workdir>/<文章文件夹>/` 下，由 Java 侧搬进系统相册。
+    图片落在 `<workdir>/pending/<文章文件夹>/` 下，由 Java 侧搬进系统相册。
+    ⚠ `workdir` 是根目录（Java 传的是应用 filesDir），`pending/` 由本模块自己建。
     Java 调这个函数**只传两个参数**（`get` 是给测试注入假网络用的）。
     """
     try:

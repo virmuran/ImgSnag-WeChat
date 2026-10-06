@@ -405,6 +405,20 @@ def test_cross_language_contract():
     params = list(inspect.signature(android.snag_text).parameters)
     eq(params[:2], ['text', 'workdir'], 'snag_text 前两个参数与 Java 的调用一致')
 
+    # workdir 的**语义**也要钉死：Python 约定"给它根目录，它自己建 pending 层"。
+    # 所以 Java 必须把 filesDir 根传给 snag_text，自己扫描的是底下的 pending 层。
+    # （曾翻车：Java 把 pending 层传给了 snag_text，图落在 pending/pending/…，
+    #   用户看到「共 4 张…没有新图片可入库」，两边都不报错 —— 真机首跑才发现。
+    #   光钉常量名相等抓不住这个 bug，还得钉"传的是哪一层"。）
+    check(re.search(r'new File\(\w+, PENDING_DIR\)', main_java) is not None,
+          'Java 扫描/清理用的是 filesDir 底下的 pending 层')
+    m = re.search(r'callAttr\("snag_text", raw,\s*([^)]+)\)', main_java)
+    check(m is not None, '找到 snag_text 的调用')
+    if m:
+        check(not m.group(1).startswith('workRoot'),
+              f'传给 snag_text 的必须是 filesDir 根，不能是 pending 层'
+              f'（实际传了 {m.group(1)}，会嵌成 pending/pending）')
+
     check(os.path.exists(os.path.join(PY_DIR, 'imgsnag_android.py')),
           'Java 里 getModule("imgsnag_android") 对应的文件存在')
     check('imgsnag_android' in main_java, 'Java 里确实调了这个模块')
@@ -484,6 +498,9 @@ def test_workflow():
     check('gh release delete' in wf and 'gh release create' in wf,
           '更新 apk-latest 预发布')
     check('apk-latest' in wf, '发布位置固定为 apk-latest（下载入口只有一个）')
+    check('types: [published]' in wf, '正式发版（Publish Release）时自动给该版本补挂 APK')
+    check('gh release upload' in wf, 'APK 会附加到对应的版本 Release（exe/zip/apk 并排）')
+    check("!= 'apk-latest'" in wf, 'apk-latest 被手动 Publish 时不会触发套娃构建')
     check('keytool -list' in wf, '构建前先验一次签名密钥能否被 JDK 读取')
     check('libpython3' in wf, '验包会检查 libpython 是否真的进了包')
     check('unzip -l' in wf, '验包看的是包内实际内容')
