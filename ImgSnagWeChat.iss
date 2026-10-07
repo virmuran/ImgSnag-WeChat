@@ -31,7 +31,9 @@ PrivilegesRequired=admin
 Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加任务:"; Flags: checkedonce
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 简中语言文件随仓库分发（Languages\ChineseSimplified.isl）：
+; 官方 Inno Setup 6 不自带该文件（云构建会挂），本机 Inno 7 才内置
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Files]
 Source: "dist\ImgSnagWeChat\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs

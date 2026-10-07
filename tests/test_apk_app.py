@@ -594,6 +594,27 @@ def test_desktop_workflow():
     check(os.path.exists(os.path.join(ROOT, 'build_release.py')),
           '本机打包脚本保留着（网络不通 / 云上出问题时的兜底）')
 
+    # ⚠ 简中语言文件必须随仓库分发：官方 Inno Setup 6（云上那版）不自带
+    #   ChineseSimplified.isl，本机 Inno 7 才内置。iss 若引 compiler: 相对路径，
+    #   本机编译全绿、云上 Inno 编译一步就挂 —— 又是"本地过云端炸"的静默类。
+    iss_path = os.path.join(ROOT, 'ImgSnagWeChat.iss')
+    check(os.path.exists(iss_path), 'Inno 脚本存在')
+    iss = read(iss_path)
+    m = re.search(r'MessagesFile:\s*"([^"]+)"', iss)
+    check(m is not None, 'iss 里有语言文件引用')
+    if m:
+        rel = m.group(1).replace('/', '\\')
+        check(not rel.lower().startswith('compiler:'),
+              '语言文件走仓库相对路径（不走 compiler: 安装目录）')
+        check(os.path.exists(os.path.join(ROOT, rel)),
+              f'语言文件随仓库分发：{rel}')
+        isl_path = os.path.join(ROOT, rel)
+        if os.path.exists(isl_path):
+            with open(isl_path, 'rb') as f:
+                head = f.read(3)
+            check(head == b'\xef\xbb\xbf',
+                  '语言文件带 UTF-8 BOM（无 BOM 时 Inno 按本地代码页解码，中文会花）')
+
     try:
         import yaml
     except ImportError:
