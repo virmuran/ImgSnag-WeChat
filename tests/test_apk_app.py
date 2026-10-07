@@ -603,7 +603,9 @@ def test_desktop_workflow():
     m = re.search(r'MessagesFile:\s*"([^"]+)"', iss)
     check(m is not None, 'iss 里有语言文件引用')
     if m:
-        rel = m.group(1).replace('/', '\\')
+        # ⚠ 分隔符统一用 '/'：这条测试在 Linux 运行器上也要跑，
+        #   反斜杠在 POSIX 下不是分隔符（曾因此云端自检挂、本机全绿）
+        rel = m.group(1).replace('\\', '/')
         check(not rel.lower().startswith('compiler:'),
               '语言文件走仓库相对路径（不走 compiler: 安装目录）')
         check(os.path.exists(os.path.join(ROOT, rel)),
