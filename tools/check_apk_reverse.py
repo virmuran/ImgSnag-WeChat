@@ -228,6 +228,26 @@ CASES = [
      "            'unknown': bool(remote_ms and not installed_at),",
      "            'unknown': False,",
      '[13] 问不到安装时间时如实说', TEST_WEB),
+
+    # ── 「复制标题」（沐然新提的小功能）───────────────────────────────
+    # 这一组错了都不报错：按钮点了没反应、或者复制出来是空的 ——
+    # 都是"用户会以为软件坏了、但日志里一个字都没有"的那类。
+    ('页面改用 navigator.clipboard（http 页面里不可靠，等于点了没反应）', WEBUI,
+     "return window.imgsnag.copy(text) === 'ok';",
+     'return true;',
+     '[9] 写剪贴板走 Java 的桥', TEST_WEB),
+    ('没标题时按钮照样可点（点了什么也不会发生）', WEBUI,
+     "  $('#copyBtn').disabled = !st.title || st.phase === 'parsing';\n",
+     '',
+     '[9] 按钮可用状态跟着标题走', TEST_WEB),
+    ('Java 的 copy 没标 @JavascriptInterface（JS 调不到，且不报错）', MAIN_JAVA,
+     '@JavascriptInterface\n        public String copy(String text) {',
+     'public String copy(String text) {',
+     '[10] copy() 标了 @JavascriptInterface', TEST_WEB),
+    ('Java 的 copy 成了空实现（签名在、剪贴板没写）', MAIN_JAVA,
+     'cm.setPrimaryClip(ClipData.newPlainText("标题", text));',
+     '// 忘了真写',
+     '[10] 真的写进了系统剪贴板', TEST_WEB),
 ]
 
 #: 老用例不写"跑哪个测试文件"就默认跑 test_apk_app.py —— 免得为了加个字段

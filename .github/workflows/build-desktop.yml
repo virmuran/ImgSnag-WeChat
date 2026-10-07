@@ -1,0 +1,98 @@
+# 在 GitHub 的服务器上打出桌面版的两个产物（安装包 exe + 便携 zip）
+#
+# ── 现在是什么状态 ──
+# **已开启自动触发**：Publish 一个正式版本（vX.Y.Z）时自动跑一次，把 exe 和
+# 便携 zip 补进同一个 Release —— 与 APK 工作流同一个思路，下载入口只有那一页。
+#
+# 本机打包（`build_release.py`）**保留不动**，作为兜底：网络不通、想快速验一次、
+# 或者云上哪天出了问题，本机照样能出包。
+#
+# ── 怎么手动跑 ──
+# 仓库页面 → Actions → 左侧 "Build Desktop" → Run workflow。
+# 手动跑**不碰 Release**，只在构建记录底部留可下载的 artifact（适合先试一次）。
+#
+# ── 云上有什么（决定这套配置为什么这么写）──
+# · windows-latest 预装了 Inno Setup 6.7.1，装的是 6.x 而非 7.x，路径还在
+#   "Program Files (x86)" 下 —— 所以 build_release.py 里的编译器是**探测**着找的，
+#   不写死路径；本机（Inno Setup 7，Program Files）和云上都能用。
+# · Python 用 setup-python 装 3.13，与 requirements.txt 对得上。
+
+name: Build Desktop
+
+on:
+  workflow_dispatch:               # 手动：只出 artifact，不碰 Release
+  release:
+    types: [published]             # 正式发版：把 exe / zip 补进那个 Release
+
+permissions:
+  contents: write                  # 以后要把产物挂进 Release，需要这个
+
+# 连点两次时把前一次还没跑完的取消掉，别白烧时间
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # 防套娃：apk-latest 是 APK 工作流自己发的滚动预发布位，
+    # 万一它被手动 Publish 成正式 Release，这里不该再触发一轮桌面打包
+    if: github.event_name != 'release' || github.event.release.tag_name != 'apk-latest'
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # build_release.py 里调的是 `.venv/Scripts/python.exe`（本机就是这路径）。
+      # 云上没有 .venv，这里就照本机的方式建一个 —— 这样两边跑的是同一份脚本、
+      # 同一条路径，不用为云上单独再写一套。
+      - name: 建虚拟环境并装依赖
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+
+      # 打包前先跑全量自检。它能在几分钟的打包之前拦住两类问题：
+      # 同步副本忘了更新、桌面/安卓共用的解析规则被改坏。
+      # 嫌它拖时间、只想快点拿到包，可以把这一段删掉。
+      - name: 打包前自检
+        run: .venv\Scripts\python.exe tests/run_all.py
+
+      - name: 打包（PyInstaller + Inno Setup + 便携 zip）
+        run: .venv\Scripts\python.exe build_release.py
+
+      - name: 读版本号
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path version.py -Pattern 'VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$ver" -Encoding utf8
+          Write-Host "版本 v$ver"
+        id: pack
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImgSnag-Desktop-${{ steps.pack.outputs.version }}
+          path: |
+            installer/*.exe
+            dist/*.zip
+          if-no-files-found: error
+
+      # 正式发版（Publish 一个 vX.Y.Z 的 Release）时，把两个文件补进同一个 Release
+      # —— 与 APK 工作流同一个思路，下载入口永远只有那一页。
+      #
+      # 手动触发时这一步自动跳过（那时没有 Release 上下文），只留上面那份 artifact。
+      - name: 补进本次版本 Release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload $env:TAG installer/*.exe dist/*.zip --clobber
+          Write-Host "已把 exe 与便携 zip 附加到 Release $env:TAG"

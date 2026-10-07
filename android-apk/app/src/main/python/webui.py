@@ -13,7 +13,7 @@ Chaquopy 把 Python 源码打进 APK 后，"源码同目录的文件运行时还
 交互约定：
   · 点缩略图 = 看大图（手机上的直觉）；点右上角圆圈 = 勾选/取消勾选
   · 大图左右滑动 = 翻上/下一张（放大状态下改成平移，不翻页）
-  · 底部常驻条 = 全选 / 已选张数 / 保存到相册
+  · 底部常驻条 = 全选 / 已选张数 / 保存
   · 分享进来会**自动解析**，抓完停在结果页让你确认再入库（不直接写相册）
 
 ────────────────────────────────────────────────────────────────────────
@@ -190,8 +190,11 @@ input::placeholder{color:var(--sub)}
   align-items:center; padding:9px 12px calc(9px + env(safe-area-inset-bottom));
   background:var(--card); border-top:1px solid var(--line);
 }
-#selInfo{font-size:13px; color:var(--sub); min-width:64px}
-#bar .btn{padding:12px 14px}
+#selInfo{font-size:12.5px; color:var(--sub); flex:1; min-width:0}
+#bar .btn{padding:13px 12px; font-size:14.5px}
+/* 「复制」挤在保存按钮左边。窄屏（360dp）这一行要塞四个元素，
+   所以它比另外两个按钮再收一档宽度，并把"已选 N 张"改成弹性的（flex:1）。 */
+#copyBtn{padding:13px 10px; font-size:14px}
 
 /* ── 历史 ── */
 .hrow{
@@ -329,7 +332,8 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
 <div id="bar" hidden>
   <button class="btn" id="allBtn">全选</button>
   <span id="selInfo">已选 0 张</span>
-  <button class="btn primary" id="saveBtn" disabled>保存到相册</button>
+  <button class="btn" id="copyBtn" disabled>复制</button>
+  <button class="btn primary" id="saveBtn" disabled>保存</button>
 </div>
 
 <div id="viewer" hidden>
@@ -455,7 +459,7 @@ $('#url').onkeydown = function(e){
 };
 
 /* ── 与 Java 的桥 ──
-   四个方法（read / depth / open / installedAt）一律写成"桥不在就当没有"：
+   五个方法（read / copy / depth / open / installedAt）一律写成"桥不在就当没有"：
    在电脑浏览器里直接开这个页面调试时 window.imgsnag 不存在，
    这里若抛异常，后面的脚本整段都不会执行 —— 表现是"页面半死"，最难查。 */
 
@@ -489,6 +493,18 @@ function installedAt(){
     }
   }catch(e){ /* 没桥 */ }
   return 0;
+}
+
+/* 把一段文字写进系统剪贴板（「复制」用）。返回 true = 确实写进去了。
+   为什么不试 `navigator.clipboard`：它要求安全上下文 + 用户授权，而这个页面是
+   `http://127.0.0.1`，实机行为不可预期 —— 走原生桥最稳，也顺手避开权限弹窗。 */
+function copyText(text){
+  try{
+    if (window.imgsnag && window.imgsnag.copy){
+      return window.imgsnag.copy(text) === 'ok';
+    }
+  }catch(e){ /* 桥坏了按失败处理 */ }
+  return false;
 }
 
 /* 剪贴板：Java 侧注入的只读桥。浏览器里直接开这个页面时桥不存在，
@@ -552,6 +568,15 @@ $('#saveBtn').onclick = function(){
     if (!r.ok) toast('现在不能保存：' + (r.state ? r.state.message : ''));
   });
 };
+/* 复制：复制的是这篇文章的**名字**，不含日期编号（后端给的 title 本来就是原文，
+   从历史打开时那边也已剥掉前缀）。没桥时给一句人话，而不是点了没反应。 */
+$('#copyBtn').onclick = function(){
+  var t = (st.title || '').trim();
+  if (!t){ toast('还没有标题可复制'); return; }
+  // 长标题塞进 toast 会把提示条撑爆，回显时截一下（复制进剪贴板的仍是全文）
+  var shown = t.length > 14 ? t.slice(0, 14) + '…' : t;
+  toast(copyText(t) ? ('已复制：' + shown) : '复制失败 —— 这个按钮要在 App 里用');
+};
 
 function buildGrid(){
   var g = $('#grid');
@@ -604,7 +629,10 @@ function paintBar(){
   $('#saveBtn').disabled = sel.size === 0 || st.phase === 'parsing'
     || st.phase === 'saving';
   $('#saveBtn').textContent = st.phase === 'saving' ? '保存中…'
-    : ('保存到相册' + (st.phase === 'saved' ? '（再存）' : ''));
+    : (st.phase === 'saved' ? '再存' : '保存');
+  // 复制的是**这次的文章标题**（后端给的 st.title 本来就是原文，不含日期编号；
+  // 从历史打开时那边同样已剥掉前缀）。没标题、或还在解析中就没什么可复制的。
+  $('#copyBtn').disabled = !st.title || st.phase === 'parsing';
   $('#allBtn').textContent = (st.count && sel.size >= st.count) ? '全不选' : '全选';
 }
 function paintCheck(){

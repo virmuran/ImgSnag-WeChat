@@ -992,6 +992,22 @@ def test_page_contract():
     check('function reportDepth(' in page, '有"把层级报给 Java"这个动作')
     calls = len(re.findall(r'reportDepth\(\);', page))
     check(calls >= 4, f'reportDepth() 每次进出层级都调了（找到 {calls} 处）')
+
+    # 「复制」：底部条上挨着「保存」的那一个
+    check('id="copyBtn"' in page, '底部条有「复制」按钮')
+    check(re.search(r'id="copyBtn"[^>]*>复制</button>', page) is not None,
+          '按钮文案是「复制」（两字，与桌面版叫法一致）')
+    check(re.search(r'id="saveBtn"[^>]*>保存</button>', page) is not None,
+          '按钮文案是「保存」（两字）')
+    check("$('#copyBtn').onclick" in page, '按钮接了点击动作')
+    check('function copyText(' in page, '有"写剪贴板"这个动作')
+    # 写剪贴板必须走 Java 的桥：navigator.clipboard 要求安全上下文 + 用户授权，
+    # 而这个页面是 http://127.0.0.1，实机行为不可预期。
+    check(re.search(r'window\.[A-Za-z0-9_$]+\.copy\(', page) is not None,
+          '写剪贴板走 Java 的桥（不是 navigator.clipboard）')
+    # 没有标题时按钮要置灰 —— 否则就是"点了没反应"
+    check(re.search(r"\$\('#copyBtn'\)\.disabled\s*=", page) is not None,
+          '按钮可用状态跟着标题走（没标题时置灰）')
     check(re.search(r'window\.[A-Za-z0-9_$]+\.depth\(', page) is not None,
           '走的是桥上的 depth()')
 
@@ -1100,8 +1116,8 @@ def test_java_contract():
         check('history.replaceState' in body.group(0),
               '翻页走 replaceState（同一层里换内容）')
 
-    # 桥上的四个方法：JS 调的每一个都得标注解，否则点了一动不动
-    for meth in ('read', 'depth', 'open', 'installedAt'):
+    # 桥上的五个方法：JS 调的每一个都得标注解，否则点了一动不动
+    for meth in ('read', 'copy', 'depth', 'open', 'installedAt'):
         got = re.search(r'public\s+[\w<>\[\]]+\s+' + meth + r'\s*\(', main)
         check(got is not None, f'桥上有 {meth}() 方法')
         if got:
@@ -1121,6 +1137,9 @@ def test_java_contract():
     check('@JavascriptInterface' in main, '桥方法标了注解（不标就不暴露给 JS）')
     check('addJavascriptInterface' in main, '确实注入了桥')
     check('getHtmlText' in main, '连剪贴板里的 HTML 一起取（浏览器复制的正文在里面）')
+    # 「复制标题」得真的写进剪贴板。只查 `copy(String` 不够 —— 空实现照样有那个签名。
+    check('setPrimaryClip' in main, '「复制标题」真的写进了系统剪贴板')
+    check('ClipData.newPlainText' in main, '写的是纯文本（不要富文本，粘到别处会带一堆格式）')
 
     # ⑧ 手写的文件不能被同步覆盖
     planned = [rel for rel, _src, _d in sync_core.planned()]

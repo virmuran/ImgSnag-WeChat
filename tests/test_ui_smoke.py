@@ -17,10 +17,10 @@
    解析进行中同一个按钮要变成「取消解析」并且**仍可点击**——按钮若被禁用就没法中止了。
 
 三、文案与实现一致
-   「过滤小图与装饰」的提示里不许再出现从未内置过的固定尺寸（321×192 等）。
+   「过滤小图」的提示里不许再出现从未内置过的固定尺寸（321×192 等）。
 
 四、保存链路端到端
-   真的按一次「下载选中图片」，等文件落到磁盘上。v1.1.2 丢过一次 app.py 里
+   真的按一次「下载」，等文件落到磁盘上。v1.1.2 丢过一次 app.py 里
    `SaveWorker` 的 import，只有走到这条路径才发现（详见 test_download_through_gui）。
 
 五、v1.2.0 的界面改进
@@ -73,7 +73,7 @@
   就变成 img_01_1，越用越乱。现在默认直接存进「图库／日期_时分秒_标题」，不再弹框，
   「下载」目录里也不会再堆图集（那是最容易顺手清空的地方）。这里钉的不是「有没有弹框」，
   而是几件容易做错的事：默认路径不许还弹框、标题取不到要有兜底名、同名要另起 _2 不许覆盖、
-  「另存到…」同样建子文件夹、图库不可用要**回退**到手动选择而不是让下载白费；
+  「另存」同样建子文件夹、图库不可用要**回退**到手动选择而不是让下载白费；
   以及历史页：本地文件夹没了要标出来并把「打开」置灰，别给个点了没反应的按钮。
 
 十二、v1.7.1 两处交互调整（UI-25）
@@ -205,7 +205,7 @@ def test_cancel_button(app):
 def test_copy_matches_impl(app):
     from web_image_dl.app import ImageDownloaderApp
 
-    print('\n[UI-6] 「过滤小图与装饰」的说明与实际生效的规则一致')
+    print('\n[UI-6] 「过滤小图」的说明与实际生效的规则一致')
     win = ImageDownloaderApp()
     tip = win.filter_square_cb.toolTip()
 
@@ -310,7 +310,7 @@ def test_download_through_gui(app):
             check(size > 0, f'{name} 不是空文件（实测 {size} 字节）')
 
         # 界面状态要复位，否则用户看到的是永远停在「保存中」的按钮
-        eq(win.download_btn.text(), '下载选中图片 (3)', '保存结束后按钮文案复位')
+        eq(win.download_btn.text(), '下载 (3)', '保存结束后按钮文案复位')
         check(win.download_btn.isEnabled(), '保存结束后按钮恢复可用')
 
         win.close()
@@ -464,7 +464,7 @@ def test_hidden_hint(app):
 
     win._on_toggle_hidden()
     QApplication.processEvents()
-    check(not win.filter_square_cb.isChecked(), '点提示按钮 = 取消「过滤小图与装饰」')
+    check(not win.filter_square_cb.isChecked(), '点提示按钮 = 取消「过滤小图」')
     check(all(not it.filtered_out for it in win.thumb_items), '小图重新显示出来')
     check('正在显示 1' in win.hidden_btn.text(), f'提示改为「正在显示」：{win.hidden_btn.text()!r}')
 
@@ -487,16 +487,16 @@ def test_select_all_button(app):
         win._on_image_loaded(i, info)
     QApplication.processEvents()
 
-    # 解析完的图默认就是全勾选的（重复图除外），所以按钮一进来就是「取消全选」
-    eq(win.select_all_btn.text(), '取消全选', '默认全勾选时按钮显示「取消全选」')
+    # 解析完的图默认就是全勾选的（重复图除外），所以按钮一进来就是「全不选」
+    eq(win.select_all_btn.text(), '全不选', '默认全勾选时按钮显示「全不选」')
     win._on_select_all_clicked()
     QApplication.processEvents()
-    eq(win.select_all_btn.text(), '全选', '取消全选后文案翻转')
+    eq(win.select_all_btn.text(), '全选', '点「全不选」后文案翻转')
     check(not any(it.checkbox.isChecked() for it in win.thumb_items), '全部取消勾选')
 
     win._on_select_all_clicked()
     QApplication.processEvents()
-    eq(win.select_all_btn.text(), '取消全选', '全选后文案再翻回来')
+    eq(win.select_all_btn.text(), '全不选', '再点「全选」后文案翻回来')
     check(win.thumb_items[0].checkbox.isChecked() and win.thumb_items[2].checkbox.isChecked(),
           '非重复图被勾上')
     check(not win.thumb_items[1].checkbox.isChecked(), '重复图不参与批量选择')
@@ -1016,7 +1016,7 @@ def test_blocked_panel(app):
         # 整页都算「不可见」，isVisible 恒为 False，只有显式隐藏才是我们要断言的
         check(not win.blocked_empty.isHidden(), '空的时候说明去哪儿屏蔽')
         check(win.blocked_scroll.isHidden(), '空的时候不占地方')
-        check(win.blocked_clear_btn.isHidden(), '空的时候没有「全部恢复」')
+        check(win.blocked_clear_btn.isHidden(), '空的时候没有「全恢复」')
         eq(win.blocked_title.text(), '已屏蔽的尺寸', '标题不显示多余的 (0)')
 
         infos = _fake_infos(3)
@@ -1040,7 +1040,7 @@ def test_blocked_panel(app):
         check('屏蔽' in win.thumb_items[0].toolTip(), 'tooltip 说清是被哪条规则拦下的')
         eq(win.blocked_title.text(), '已屏蔽的尺寸 (1)', '面板标题给出条数')
         check(not win.blocked_scroll.isHidden(), '有内容时列表显示出来')
-        check(not win.blocked_clear_btn.isHidden(), '有内容时出现「全部恢复」')
+        check(not win.blocked_clear_btn.isHidden(), '有内容时出现「全恢复」')
         check(win.blocked_empty.isHidden(), '有内容时空状态提示让位')
 
         row_w = win.blocked_rows.itemAt(0).widget()
@@ -1057,7 +1057,7 @@ def test_blocked_panel(app):
               '放回来的图直接勾上 —— 撤销屏蔽的本意就是「这些我要下」')
         check(not win.blocked_empty.isHidden(), '面板回到空状态')
 
-        # 「全部恢复」
+        # 「全恢复」
         win._on_block_size(infos[1], 'avatar', (infos[1].width, infos[1].height))
         win._on_block_size(infos[2], 'cover', (infos[2].width, infos[2].height))
         QApplication.processEvents()
@@ -1073,7 +1073,7 @@ def test_blocked_panel(app):
         finally:
             QMessageBox.question = orig_q
 
-        eq(blocked_config.count(), 0, '「全部恢复」清空了屏蔽表')
+        eq(blocked_config.count(), 0, '「全恢复」清空了屏蔽表')
         eq(blocked_config.list_blocked(), [], '列表也空了')
         check(not win.thumb_items[1].filtered_out and not win.thumb_items[2].filtered_out,
               '两条屏蔽拦下的图都放回来了')
@@ -1130,7 +1130,7 @@ def test_settings_persist(app):
         QApplication.processEvents()
         eq(win2.sort_cb.currentIndex(), 2, '排序方式被记住')
         eq(win2.fmt_cb.currentText(), 'JPG', '保存格式被记住')
-        eq(win2.filter_square_cb.isChecked(), False, '「过滤小图与装饰」开关被记住')
+        eq(win2.filter_square_cb.isChecked(), False, '「过滤小图」开关被记住')
         eq(win2.original_cb.isChecked(), False, '「原图画质」开关被记住')
         # 宽度不做 ±4 精确断言：离屏平台的 restoreGeometry 在贴近屏幕右缘时会
         # 加上窗框边距再钳制（实测存 780/790 都恢复成 792），宽度的最后几像素
@@ -1147,7 +1147,7 @@ def test_settings_persist(app):
               '确实来自上次的几何信息，而不是 __init__ 里的默认 resize')
         eq(win2._last_save_dir(), r'C:\Windows', '上次保存的目录被记住')
 
-        # 「另存到…」对话框要真的从那个目录开始（下载本身已经不弹框了）
+        # 「另存」对话框要真的从那个目录开始（下载本身已经不弹框了）
         seen = {}
         orig_dialog = QFileDialog.getExistingDirectory
         QFileDialog.getExistingDirectory = staticmethod(
@@ -1157,7 +1157,7 @@ def test_settings_persist(app):
             win2._on_download_as()
         finally:
             QFileDialog.getExistingDirectory = orig_dialog
-        eq(seen.get('start'), r'C:\Windows', '「另存到…」从上次的目录开始，不用重新导航')
+        eq(seen.get('start'), r'C:\Windows', '「另存」从上次的目录开始，不用重新导航')
 
         # 目录被删了 → 回落到系统默认，而不是弹一个不存在的路径
         settings.set(K_LAST_SAVE_DIR, r'C:\__imgsnag_not_exist__')
@@ -1409,8 +1409,8 @@ def test_auto_library_folder(app):
     a) 默认路径**不再弹选择框**（还弹就等于没改）
     b) 文件夹名 = 日期_时分秒_标题；标题取不到时用兜底名
     c) 同名撞车要另起一个（_2），绝不覆盖上一次下的图
-    d) 「另存到…」这次放到别处，但同样建专属子文件夹
-    e) 「打开图库」优先打开最近一次真正落盘的目录
+    d) 「另存」这次放到别处，但同样建专属子文件夹
+    e) 「图库」优先打开最近一次真正落盘的目录
     f) 图库目录不可用时必须**回退**到手动选择，而不是直接报错让用户下不成
     """
     from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -1535,9 +1535,9 @@ def test_auto_library_folder(app):
                 w4.wait(15000)
                 QApplication.processEvents()
             subs4 = os.listdir(elsewhere)
-            eq(len(subs4), 1, '「另存到…」也在其中建了一个子文件夹')
+            eq(len(subs4), 1, '「另存」也在其中建了一个子文件夹')
             check(bool(subs4) and subs4[0].endswith('另存的标题'),
-                  '「另存到…」同样按 日期_时分秒_标题 命名')
+                  '「另存」同样按 日期_时分秒_标题 命名')
             eq(sorted(os.listdir(os.path.join(elsewhere, subs4[0]))), ['img_01.png'],
                '图落进另存位置的那个子文件夹')
 
@@ -1546,7 +1546,7 @@ def test_auto_library_folder(app):
             os.startfile = staticmethod(lambda p: opened.append(p))
             win4._on_open_library()
             eq(opened, [os.path.join(elsewhere, subs4[0])],
-               '「打开图库」优先打开最近落盘的那个子文件夹')
+               '「图库」优先打开最近落盘的那个子文件夹')
             win4.close()
             QApplication.processEvents()
 
@@ -1714,7 +1714,7 @@ def test_reparse_and_action_row(app):
         check('已有解析' in win.status.currentMessage(),
               f'状态栏说明为什么不触发（实测 {win.status.currentMessage()!r}）')
 
-        # ---- (b3) 保存进行中点「另存到…」不许开第二个落盘线程 ----
+        # ---- (b3) 保存进行中点「另存」不许开第二个落盘线程 ----
         # 两个 SaveWorker 会互相覆盖 self.save_worker，进度回调全乱
         started.clear()
         dialog_opened = []
@@ -1733,7 +1733,7 @@ def test_reparse_and_action_row(app):
         finally:
             _FD.getExistingDirectory = orig_get
             win.save_worker = None
-        eq(dialog_opened, [], '保存进行中「另存到…」不弹目录框')
+        eq(dialog_opened, [], '保存进行中「另存」不弹目录框')
         check('保存中' in win.status.currentMessage(),
               f'状态栏说明要等这一批完成（实测 {win.status.currentMessage()!r}）')
 
@@ -1839,7 +1839,7 @@ def test_browse_history_batch(app):
             check(win.preview._source is not None and not win.preview._source.isNull(),
                   '大图预览真的有内容')
             eq(win._article_title, '历史文章',
-               '标题从文件夹名剥掉日期得到（供「另存到…」命名）')
+               '标题从文件夹名剥掉日期得到（供「另存」命名）')
             check('历史图库' in win.info_label.text(),
                   f'信息栏说明这是历史图库（实测 {win.info_label.text()!r}）')
             msg = win.status.currentMessage()
@@ -1852,8 +1852,8 @@ def test_browse_history_batch(app):
             check('已在本地' in win.download_btn.text(),
                   f'按钮文案说明原因（实测 {win.download_btn.text()!r}）')
             check('另存到' in (win.download_btn.toolTip() or ''),
-                  '禁用按钮的 tooltip 指向「另存到…」这条出路')
-            check(win.save_as_btn.isEnabled(), '「另存到…」仍然可用（要复制到别处是合理需求）')
+                  '禁用按钮的 tooltip 指向「另存」这条出路')
+            check(win.save_as_btn.isEnabled(), '「另存」仍然可用（要复制到别处是合理需求）')
             before = win.save_worker
             win._on_download()          # 绕过按钮直接调，守卫也得拦住
             check(win.save_worker is before, '直接调 _on_download 也不会开落盘线程')
@@ -1970,6 +1970,84 @@ def test_reparse_keeps_download(app):
         QApplication.processEvents()
 
 
+def test_copy_title(app):
+    """「复制」按钮（UI-28）：一键复制这次解析的文章名字。
+
+    名字在两个场景里含义不同，两处都要钉：
+      a) 刚解析完 → 复制的是**完整原文标题**（worker 取到的那个：没截断、没删字符）；
+      b) 浏览历史 → 只能从批次文件夹名反推，必须**剥掉 `日期_时分秒_` 前缀** ——
+         不剥的话用户拿到的就是 `2026-09-21_100000_历史文章` 这一整串，而
+         「不要前面的日期编号」正是提这个需求的原因；
+      c) 没有标题时按钮**置灰但常驻**：全栏文案压到两三个字后，最小宽度从 796
+         降到 680（正好是"笔记本半屏"那个设计目标），常驻放得下。
+    """
+    from web_image_dl.app import ImageDownloaderApp
+    from web_image_dl.history_manager import HistoryEntry
+
+    print('\n[UI-28] 一键复制文章标题（不带日期编号）')
+
+    tmp = tempfile.mkdtemp(prefix='imgsnag_copy_')
+    batch = os.path.join(tmp, '2026-09-21_100000_历史文章')
+    os.makedirs(batch)
+    with open(os.path.join(batch, 'img_01.png'), 'wb') as f:
+        f.write(png_bytes(40, 30))
+
+    with _isolated_config():
+        win = ImageDownloaderApp()
+        win.show()
+        QApplication.processEvents()
+        cb = QApplication.clipboard()
+
+        # ---- (a) 还没解析：按钮在，只是点不动 ----
+        # 早先因为动作栏太宽（11 个控件、最小 796px），这个按钮只能"有标题才出现"。
+        # 全栏文案压到两三个字之后最小宽度降到 636 → 常驻也只到 680，于是改成常驻置灰：
+        # 位置固定的按钮比忽隐忽现的好找。
+        check(win.copy_title_btn.isVisible(),
+              '「复制」常驻在动作栏上（不再忽隐忽现）')
+        check(not win.copy_title_btn.isEnabled(), '没有标题时置灰，点不动')
+
+        # ---- (a2) 动作栏按钮文案都是两三个字 ----
+        # 这是"窗口能缩到 680"的前提。查文案而不是查像素宽度 —— 像素随字体漂移
+        # （曾出现最小宽度 800→828 的假红灯），文案是钉死的。
+        eq(win.open_lib_btn.text(), '图库', '动作栏「图库」')
+        eq(win.save_as_btn.text(), '另存', '动作栏「另存」')
+        eq(win.copy_title_btn.text(), '复制', '动作栏「复制」')
+        eq(win.download_btn.text(), '下载', '动作栏「下载」')
+
+        # ---- (b) 解析完成：完整原文标题，原样进剪贴板 ----
+        full = '秋天的第一杯奶茶：这家店排队两小时才买得到'
+        win._article_title = full
+        win._update_copy_btn()
+        QApplication.processEvents()
+        check(win.copy_title_btn.isEnabled(), '有标题后变成可点')
+        check(full in (win.copy_title_btn.toolTip() or ''),
+              'tooltip 里能看到将要复制什么（结果页本身不显示标题）')
+        cb.setText('占位')          # 先塞点别的，确认真的被覆盖而不是恰好相等
+        win._on_copy_title()
+        eq(cb.text(), full, '复制的是完整原文标题（没截断、没日期编号）')
+        check('已复制' in win.status.currentMessage(),
+              f'状态栏给了反馈（实测 {win.status.currentMessage()!r}）')
+
+        # ---- (c) 浏览历史：从文件夹名反推，日期编号必须剥掉 ----
+        win._on_browse_batch(HistoryEntry(
+            id=88, source_url='https://mp.weixin.qq.com/s/COPY',
+            parsed_at='2026-09-21T10:00:00', total_images=1, success_images=1,
+            save_path=batch, status='done'))
+        QApplication.processEvents()
+        win._on_copy_title()
+        eq(cb.text(), '历史文章', '从历史进入时复制的是剥掉日期编号的标题')
+        check(not re.match(r'^\d{4}-\d{2}-\d{2}_\d{6}', cb.text()),
+              f'复制出来的名字不带日期编号（实测 {cb.text()!r}）')
+
+        # ---- (d) 重新解析：标题清空，按钮重新变灰（但还留在原位）----
+        win._reset_before_parse()
+        QApplication.processEvents()
+        check(not win.copy_title_btn.isEnabled(), '开始新解析后标题清空，按钮变灰')
+
+        win.close()
+        QApplication.processEvents()
+
+
 def main():
     app = QApplication.instance() or QApplication([])
 
@@ -2009,6 +2087,7 @@ def main():
     test_reparse_and_action_row(app)
     test_browse_history_batch(app)
     test_reparse_keeps_download(app)
+    test_copy_title(app)
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

@@ -323,6 +323,32 @@ public class MainActivity extends Activity {
         }
 
         /**
+         * 把一段文字放进系统剪贴板（「复制标题」用）。
+         *
+         * 返回 "ok" / "fail" 而不是 void：网页那边要按结果给提示 —— 写剪贴板在
+         * 个别 ROM 上会抛（应用没有焦点、剪贴板被别的应用占着），**静默失败**
+         * 恰恰是用户最讨厌的那种"点了没反应"。
+         */
+        @JavascriptInterface
+        public String copy(String text) {
+            if (text == null || text.isEmpty()) {
+                return "fail";
+            }
+            try {
+                ClipboardManager cm =
+                        (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm == null) {
+                    return "fail";
+                }
+                cm.setPrimaryClip(ClipData.newPlainText("标题", text));
+                return "ok";
+            } catch (Throwable t) {
+                // 与 read() 同样的理由：写不进也不能把整个界面弄崩
+                return "fail";
+            }
+        }
+
+        /**
          * 网页上报"现在在第几层"。只往内存里记一个数，不读不写任何东西。
          * 这是返回手势唯一的判据，见 {@link #handleBack()}。
          */

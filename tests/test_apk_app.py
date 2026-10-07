@@ -55,6 +55,8 @@ ROOT_GRADLE = os.path.join(APK, 'build.gradle.kts')
 SETTINGS_GRADLE = os.path.join(APK, 'settings.gradle.kts')
 KEYSTORE = os.path.join(APK, 'keystore', 'imgsnag.p12')
 WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'build-apk.yml')
+#: 桌面版的云构建（Publish 后自动把 exe / 便携 zip 挂进同一个 Release）
+DESKTOP_WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'build-desktop.yml')
 README = os.path.join(APK, 'README.md')
 
 sys.path.insert(0, os.path.join(ROOT, 'android'))     # sync_core
@@ -555,6 +557,55 @@ def test_gitignore():
         check(pat in ignore, f'忽略 {pat}')
 
 
+def test_desktop_workflow():
+    """桌面版云构建（Publish 之后 exe / 便携 zip 自己出现）。
+
+    这条断言的重点不是"文件长得对"，而是**钉住自动触发这件事还在**。
+    它的失效方式完全静默：把 `release:` 那行注释掉，工作流照样合法、手动跑照样
+    出包、日志里一句提示都没有 —— 唯一的区别是 Publish 之后 Release 里少两个
+    文件。这种"没有任何代码引用、漂了也没人知道"的落地点，本项目已经栽过两次
+    （README 版本徽章静默漂了两个版本），所以必须有人盯着。
+    """
+    print('[18] 桌面版云构建工作流')
+    check(os.path.exists(DESKTOP_WORKFLOW), '桌面工作流文件存在')
+    wf = read(DESKTOP_WORKFLOW)
+
+    check('runs-on: windows-latest' in wf,
+          '跑在 windows 运行器上（PyInstaller 与 Inno Setup 都是 Windows 工具）')
+    check('actions/checkout@v4' in wf, '先取代码')
+    check("python-version: '3.13'" in wf, '装的 Python 与本机一致')
+    check('python -m venv .venv' in wf,
+          '云上照本机路径建 .venv（build_release.py 调的就是 .venv 里那个 python）')
+    check('build_release.py' in wf, '跑的就是本机那个打包脚本（两边同一份，不另写一套）')
+    check('tests/run_all.py' in wf, '打包前先跑全量自检')
+    check('actions/upload-artifact@v4' in wf, '产物作为构建物上传（手动跑时从这里取）')
+    check('gh release upload' in wf, '正式发版时把 exe / zip 补进同一个 Release')
+    check('contents: write' in wf, '给了写 Release 的权限')
+    check("!= 'apk-latest'" in wf, 'apk-latest 被手动 Publish 时不会触发套娃构建')
+
+    # ⚠ 自动触发是这套东西的全部意义。注释掉它，界面/日志/手动跑全都正常，
+    #   只有"Publish 完 Release 里没有 exe 和 zip"这一个表现，而且不报错。
+    check('workflow_dispatch' in wf, '留着手动按钮（想先试一次、或临时出一版包）')
+    check(re.search(r'^  release:', wf, re.M) is not None,
+          'release 触发器是打开着的（不是被注释掉的）')
+    check('types: [published]' in wf, '正式发版（Publish）时自动触发')
+
+    # 云构建不是替代品，是省事的那条路 —— 本机那条必须留着
+    check(os.path.exists(os.path.join(ROOT, 'build_release.py')),
+          '本机打包脚本保留着（网络不通 / 云上出问题时的兜底）')
+
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        try:
+            yaml.safe_load(wf)
+            check(True, '工作流是合法的 YAML')
+        except yaml.YAMLError as e:
+            check(False, f'工作流 YAML 解析失败：{str(e).splitlines()[0][:120]}')
+
+
 # ============================================================================
 
 def main():
@@ -570,7 +621,7 @@ def main():
                test_sync, test_manifest, test_resources_match_java,
                test_java_structure, test_cross_language_contract,
                test_gradle_config, test_python_version_contract, test_workflow,
-               test_docs, test_gitignore):
+               test_docs, test_gitignore, test_desktop_workflow):
         fn()
 
     print()

@@ -22,10 +22,28 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
-ISCC = r"C:\Program Files\Inno Setup 7\ISCC.exe"
 APP = "ImgSnagWeChat"
 SPEC = f"{APP}.spec"
 ISS = f"{APP}.iss"
+
+
+def find_iscc():
+    """找 Inno Setup 的编译器 ISCC.exe
+
+    **不能写死单一路径**：本机装的是 Inno Setup 7（在 `Program Files`），
+    而 GitHub 的 windows-latest 预装的是 6.x（还在 `Program Files (x86)`）。
+    写死会让云构建第一次就失败，而报错只说"找不到文件"，看着像打包脚本坏了。
+
+    按 7 → 6、Program Files → Program Files (x86) 的顺序探测第一个存在的。
+    """
+    bases = [os.environ.get("ProgramFiles", r"C:\Program Files"),
+             os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")]
+    for ver in (7, 6):
+        for base in bases:
+            p = os.path.join(base, f"Inno Setup {ver}", "ISCC.exe")
+            if os.path.isfile(p):
+                return p
+    return None
 
 
 def step(msg):
@@ -91,7 +109,12 @@ def main():
 
     # 3) Inno Setup 安装包
     step("Inno Setup 编译安装包")
-    run([ISCC, ISS])
+    iscc = find_iscc()
+    if not iscc:
+        sys.exit("✗ 找不到 Inno Setup 的 ISCC.exe —— 装了 Inno Setup 6 或 7 才能打安装包。\n"
+                 "  （只想出便携版的话，可以先跳过这一步）")
+    print(f"  使用 {iscc}")
+    run([iscc, ISS])
 
     # 4) 便携 zip（ZIP_LZMA；勿用 bsdtar 默认 deflate，体积差数倍）
     step("制作便携 zip")

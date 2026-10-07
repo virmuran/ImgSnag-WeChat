@@ -357,14 +357,14 @@ class ImageDownloaderApp(QMainWindow):
         action_row.addStretch()
 
         self.sort_cb = QComboBox()
-        self.sort_cb.addItems(["默认顺序", "名称", "尺寸 ↓", "尺寸 ↑", "分辨率 ↓", "分辨率 ↑"])
+        self.sort_cb.addItems(["默认", "名称", "大小 ↓", "大小 ↑", "像素 ↓", "像素 ↑"])
         self.sort_cb.setMinimumHeight(28)
         self.sort_cb.setStyleSheet("font-size: 12px; padding: 2px 6px;")
         self.sort_cb.currentIndexChanged.connect(self._on_sort)
         self.sort_cb.setEnabled(False)
         action_row.addWidget(self.sort_cb)
 
-        self.filter_square_cb = QCheckBox("过滤小图与装饰")
+        self.filter_square_cb = QCheckBox("过滤小图")
         self.filter_square_cb.setToolTip(
             "自动隐藏「不像正文图」的图片，规则共三条：\n"
             "  • 最长边 ≤ 200px 的小图（头像、图标、二维码等）\n"
@@ -385,36 +385,51 @@ class ImageDownloaderApp(QMainWindow):
         self.select_all_btn.clicked.connect(self._on_select_all_clicked)
         action_row.addWidget(self.select_all_btn)
 
-        fmt_label = QLabel("保存为"); fmt_label.setStyleSheet("font-size: 12px; color: #666;")
+        fmt_label = QLabel("格式"); fmt_label.setStyleSheet("font-size: 12px; color: #666;")
         action_row.addWidget(fmt_label)
         self.fmt_cb = QComboBox()
         self.fmt_cb.addItems(["原格式", "JPG", "PNG", "WebP"])
         self.fmt_cb.setMinimumHeight(28); self.fmt_cb.setStyleSheet("font-size: 12px; padding: 2px 4px;")
         action_row.addWidget(self.fmt_cb)
 
-        # 「打开图库」「另存到…」摆在下载按钮左边（用户指定：最右是下载，往左依次另存、图库）。
-        # 用紧凑样式压宽度：动作栏是整窗最小宽度的瓶颈，这里每一点 padding 都是
+        # 「图库」「另存」摆在下载按钮左边（用户指定：最右是下载，往左依次另存、图库）。
+        # 所有按钮文案一律压到两三个字 —— 动作栏是整窗最小宽度的瓶颈，字数直接等于像素。
+        # 用紧凑样式压宽度：这里每一点 padding 都是
         # 小屏（笔记本半屏约 680px）能不能放下的问题
         ghost_style = (
             "QPushButton { font-size: 12px; color: #555; border: 1px solid #d9d9d9;"
             " border-radius: 6px; background: #fff; padding: 3px 7px; }"
             "QPushButton:hover { border-color: #1677ff; color: #1677ff; }"
         )
-        self.open_lib_btn = QPushButton("打开图库")
+        self.open_lib_btn = QPushButton("图库")
         self.open_lib_btn.setMinimumHeight(36)
         self.open_lib_btn.setToolTip("打开下载图库目录，看看图都存在哪")
         self.open_lib_btn.setStyleSheet(ghost_style)
         self.open_lib_btn.clicked.connect(self._on_open_library)
         action_row.addWidget(self.open_lib_btn)
 
-        self.save_as_btn = QPushButton("另存到…")
+        self.save_as_btn = QPushButton("另存")
         self.save_as_btn.setMinimumHeight(36)
         self.save_as_btn.setToolTip("这一次放到别的位置（仍会在其中新建一个专属子文件夹）")
         self.save_as_btn.setStyleSheet(ghost_style)
         self.save_as_btn.clicked.connect(self._on_download_as)
         action_row.addWidget(self.save_as_btn)
 
-        self.download_btn = QPushButton("下载选中图片")
+        # 「复制」紧挨下载按钮（用户指定）。复制出来的是**不含日期编号**的纯标题：
+        # 图库里那个文件夹名长这样 `2026-10-07_153045_秋天的第一杯奶茶`，
+        # 而用户要的只是后半截。剥前缀的逻辑复用 library.title_from_folder（浏览历史时）。
+        #
+        # 这里曾经**只在有标题时出现**（当时动作栏 11 个控件、最小宽度 796px，
+        # 常驻一个按钮会顶到 868，超出"笔记本半屏"这个目标）。后来把全栏文案压到
+        # 两三个字，最小宽度降到 636 → 常驻也只到 680，于是改成常驻（没标题时置灰）。
+        self.copy_title_btn = QPushButton("复制")
+        self.copy_title_btn.setMinimumHeight(36)
+        self.copy_title_btn.setEnabled(False)
+        self.copy_title_btn.setStyleSheet(ghost_style)
+        self.copy_title_btn.clicked.connect(self._on_copy_title)
+        action_row.addWidget(self.copy_title_btn)
+
+        self.download_btn = QPushButton("下载")
         self.download_btn.setEnabled(False); self.download_btn.setMinimumHeight(36)
         self.download_btn.setStyleSheet(
             "QPushButton { background: #1677ff; color: white; border: none; border-radius: 6px; padding: 6px 12px; font-size: 14px; font-weight: bold; }"
@@ -488,7 +503,7 @@ class ImageDownloaderApp(QMainWindow):
         self.history_search.textChanged.connect(lambda _: self._refresh_history())
         header.addWidget(self.history_search)
 
-        clear_btn = QPushButton("清空历史")
+        clear_btn = QPushButton("清空")
         clear_btn.setStyleSheet("color: #ff4d4f; font-size: 12px;")
         clear_btn.clicked.connect(self._on_clear_history)
         header.addWidget(clear_btn)
@@ -547,7 +562,7 @@ class ImageDownloaderApp(QMainWindow):
         head.addWidget(self.blocked_sub)
         head.addStretch()
 
-        self.blocked_clear_btn = QPushButton("全部恢复")
+        self.blocked_clear_btn = QPushButton("全恢复")
         self.blocked_clear_btn.setToolTip("清空屏蔽表 —— 所有被屏蔽过的尺寸重新参与解析")
         self.blocked_clear_btn.setStyleSheet(
             "QPushButton { font-size: 11px; color: #ff4d4f; border: 1px solid #ffccc7;"
@@ -970,6 +985,7 @@ class ImageDownloaderApp(QMainWindow):
         self.download_btn.setEnabled(False)
         self.select_all_btn.setEnabled(False)
         self.select_all_btn.setText("全选")
+        self._update_copy_btn()      # 标题已清空，复制按钮跟着变灰
         self._update_hidden_hint()
         # 解析中按钮转为「取消解析」并保持可点 —— 若禁用就没法中止长文章的解析
         self.parse_btn.setEnabled(True)
@@ -1189,19 +1205,61 @@ class ImageDownloaderApp(QMainWindow):
             # 只读浏览：图已经在本地了。禁用而不是隐藏 —— 按钮突然消失会让人以为
             # 「下载功能坏了」，留着并写清原因才说得过去
             self.download_btn.setEnabled(False)
-            self.download_btn.setText("已在本地（历史图库）")
+            self.download_btn.setText("已在本地")
             self.download_btn.setToolTip(
                 "这是历史图库里的图片，已经存在本地，不需要再下载。\n"
                 "要复制一份到别处，用左边的「另存到…」。"
             )
         else:
             self.download_btn.setEnabled(count > 0)
-            self.download_btn.setText(f"下载选中图片 ({count})")
+            self.download_btn.setText(f"下载 ({count})")
             self.download_btn.setToolTip("")
         # 全选按钮的文案跟着勾选状态走，省掉一个「取消全选」按钮
         selectable = self._selectable_items()
         all_on = bool(selectable) and all(it.checkbox.isChecked() for it in selectable)
-        self.select_all_btn.setText("取消全选" if all_on else "全选")
+        self.select_all_btn.setText("全不选" if all_on else "全选")
+        self._update_copy_btn()
+
+    def _copy_title_text(self) -> str:
+        """这次能复制的名字 —— **不含日期编号**。
+
+        两个来源，用户拿到的东西是同一个意思：
+          · 刚解析完 → worker 取到的原文标题（完整，没截断、没删字符）
+          · 浏览历史 → 从批次文件夹名反推；`library.title_from_folder` 已剥掉
+            `2026-10-07_153045_` 前缀（不剥的话会叠成两层，见那个函数的注释）
+
+        它同时也是「另存到…」新建文件夹时用的标题 —— 所以复制出来的名字
+        跟图库里那个文件夹名是同一个，只是少了前面的日期编号。
+        """
+        return (self._article_title or "").strip()
+
+    def _update_copy_btn(self):
+        """有标题才让点，并把标题写进 tooltip。
+
+        按钮**常驻**（没标题时置灰）：全栏文案压到两三个字之后，最小宽度从 796 降到 680，
+        常驻也放得下了 —— 一个位置固定的按钮比一个忽隐忽现的好找。
+
+        tooltip 不只是说明：**结果页并不显示标题**，这是点下去之前唯一能看到
+        "将要复制什么"的地方 —— 给不出预览，至少要说清它是什么。
+        """
+        title = self._copy_title_text()
+        self.copy_title_btn.setEnabled(bool(title))
+        self.copy_title_btn.setToolTip(
+            f"复制这个名字（已去掉日期编号）：\n{title}" if title
+            else "解析完成后可以复制这篇文章的名字（自动去掉前面的日期编号）"
+        )
+
+    def _on_copy_title(self):
+        """把标题放进剪贴板。
+
+        标题**当场再读一次**，而不是用按钮那一刻的状态 —— 状态万一漂了，
+        复制错东西比复制不了更糟。
+        """
+        title = self._copy_title_text()
+        if not title:
+            return
+        QApplication.clipboard().setText(title)
+        self.status.showMessage(f"已复制标题：{title}")
 
     def _last_save_dir(self) -> str:
         """上次保存目录；已经不在了就回空串（交给系统默认位置，别弹个不存在的路径）"""
@@ -1695,6 +1753,9 @@ class ImageDownloaderApp(QMainWindow):
         self._reset_for_browse()
         # 标题参与「另存到…」的新文件夹命名，所以剥掉日期前缀，别叠成两层
         self._article_title = title_from_folder(folder)
+        # 上面这行排在 _reset_for_browse 之后，而复制按钮是在那边统一刷新的 ——
+        # 赋值完必须再刷一次，否则「查看」进去后「复制标题」一直是灰的
+        self._update_copy_btn()
         if entry.source_url:
             self.url_input.setPlainText(entry.source_url)
         self._switch_page(0)
