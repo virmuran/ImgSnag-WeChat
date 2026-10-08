@@ -117,3 +117,13 @@ chaquopy {
         buildPython("python3.12")
     }
 }
+
+dependencies {
+    // FileProvider 在这个包里 —— 应用内更新要把下载好的 APK 以 content://
+    // 交给系统安装器，安卓 7 起 file:// 会直接抛 FileUriExposedException。
+    // 这是本项目**唯一**的 Gradle 依赖：自己手写一个 ContentProvider 去顶替它
+    // 也能做，但代码量与踩坑面都不划算（而且同样要写这一个依赖的位置）。
+    // 注意区分：这里不是 Chaquopy 的 pip 包 —— 那种要走 Chaquopy 自己的仓库
+    // 并为 arm64 现编，才是构建最容易挂的一环（本项目一个都不装）。
+    implementation("androidx.core:core:1.13.1")
+}

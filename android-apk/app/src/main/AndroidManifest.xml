@@ -23,10 +23,21 @@
      表现是"侧滑直接退回桌面"，而且改了 onBackPressed 也毫无反应
      （真机上踩过一次）。这里写明 = true 免得有人把 targetSdk 降回去时
      行为悄悄变回去；配套的注册在 MainActivity.setupBack()。
+
+  5) REQUEST_INSTALL_PACKAGES + FileProvider —— 应用内更新的两件必需品。
+     更新时 App 自己下载 APK 并交给系统安装器：装包必须声明这条权限
+     （安卓 8 起），而安卓 7 起禁止用 file:// 把文件跨应用传出去
+     （FileUriExposedException），必须走 FileProvider 的 content://。
+     ⚠ 这两条**只服务于"用户自己点更新"**：App 不会在后台悄悄装任何东西，
+     而且首次使用还得用户在系统里手动开一次「允许安装未知应用」。
+     上架应用市场时这条权限会被额外审查，本项目是自用分发，不涉及。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- 应用内更新：下载完 APK 交给系统安装器 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
         android:allowBackup="false"
@@ -36,6 +47,20 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+
+        <!-- 把已下载的 APK 以 content:// 交给系统安装器（见上面的第 5 条）。
+             authority 带包名，避免与别的应用撞车；
+             exported=false + grantUriPermissions：只有我们临时授权的那个
+             安装器 Intent 能读到它，别的应用读不到。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"/>
+        </provider>
 
         <activity
             android:name=".MainActivity"

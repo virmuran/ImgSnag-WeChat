@@ -58,6 +58,17 @@ API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 SOURCE_URL = f"https://github.com/{GITHUB_REPO}"
 
+#: 比较两个版本号：a 新于 b 返回正、相同返回 0、旧于返回负。
+#:
+#: 挂在这里是为了让**各端都用同一份实现**：安卓侧那份副本没有 `version.py`
+#: （走下面的兜底实现），所以别的模块不能直接 `from version import compare_versions`。
+#: 在调用方自己重写一遍比较逻辑，迟早会和这边分叉 —— 那时出现的是
+#: 「桌面提示有新版本、手机说已是最新」这种最难查的不一致。
+compare_versions = _compare_versions
+
+#: 版本号是不是规范的三段式（`1.11.0`）。判断「能不能拿版本号下结论」用它。
+is_valid_version = _is_valid_version
+
 #: 界面侧自动检查的间隔（秒）。GitHub 未认证请求按 IP 限流 60 次/小时，
 #: 而且没必要时时刻刻去问 —— 6 小时足够，也不至于让用户觉得「从不检查」。
 CHECK_INTERVAL = 6 * 3600
@@ -157,6 +168,10 @@ class AssetInfo:
     #: 安卓版靠它判断「远端这个 .apk 是不是比我装的更新」—— 因为滚动预发布位
     #: 的 tag 里没有版本号，比版本号在「同版本号重新构建」时会漏掉更新。
     created_at: str = ""
+    #: GitHub 给的 sha256 摘要（形如 `sha256:abcd…`，老接口可能没有 = 空串）。
+    #: 应用内更新下载安装包后拿它校验：企业网络出口会把长响应截断，而截断的
+    #: APK 装上只会报"解析包时出现问题"，用户根本想不到是网络的事。
+    digest: str = ""
 
     @property
     def size_text(self) -> str:
@@ -323,6 +338,7 @@ def _build_assets(raw_assets) -> list:
             url=str(raw.get("browser_download_url") or ""),
             version=extract_version_from_name(name),
             created_at=str(raw.get("created_at") or raw.get("updated_at") or ""),
+            digest=str(raw.get("digest") or ""),
         ))
     order = {"installer": 0, "portable": 1, "file": 2}
     out.sort(key=lambda a: (order.get(a.kind, 3), a.name))

@@ -178,6 +178,18 @@ class _Response:
             raise RuntimeError(f'HTTP {self.status}')
 
 
+def build_opener(cache_dir=None, ca_dirs=None, ssl_ctx=None):
+    """构造一个 urllib opener：HTTPS 走「certifi + 系统证书」合并过的上下文。
+
+    图片抓取（`make_get`）与**应用内更新下载安装包**共用这一套 ——
+    两处各建一个上下文，迟早出现「图能抓、更新下载过不去」的怪现象，
+    而且那种现象只在装了公司根证书的环境里出现（本机永远复现不了）。
+    """
+    ctx = (ssl_ctx if ssl_ctx is not None
+           else ssl_context(cache_dir=cache_dir, ca_dirs=ca_dirs))
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+
+
 def make_get(ctx=None, opener=None):
     """返回 `get(url, **kw)`。
 
@@ -187,8 +199,7 @@ def make_get(ctx=None, opener=None):
     `opener` 是给测试留的注入口 —— 不注入就走真实网络。
     """
     ctx = ctx if ctx is not None else ssl_context()
-    opener = opener or urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ctx))
+    opener = opener or build_opener(ssl_ctx=ctx)
 
     def _get(url, **kw):
         headers = kw.get('headers') or {}

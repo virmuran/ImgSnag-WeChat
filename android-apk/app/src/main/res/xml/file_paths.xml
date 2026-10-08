@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 能"对外"开放哪些目录（应用内更新用）。
+
+  只开一个 `update/` 子目录 —— 下载好的安装包就放在那儿。
+  **不要写成 `.`**（= 整个 files 目录）：历史库、会话缓存、偏好全在同一棵树里，
+  一个路径写宽了，等于把它们一起交出去。
+
+  路径的基准是 `Context.getFilesDir()`，与 Python 侧算出来的下载目录必须一致：
+  由 Java 在启动服务时把 filesDir 传过去（见 MainActivity.bootWeb 的 files_dir 参数），
+  不靠 Python 自己猜 HOME 在哪 —— 猜错的表现是"下载成功但安装器说文件不存在"。
+-->
+<paths>
+    <files-path name="update" path="update/"/>
+</paths>

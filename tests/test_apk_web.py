@@ -94,6 +94,29 @@ def strip_comments(text):
     return re.sub(r'//[^\n]*', '', text)
 
 
+def strip_xml_comments(text):
+    """摘掉 XML 的 `<!-- -->`。**XML 一律用这个，不要用 `strip_comments`。**
+
+    两件事别混：
+      · XML 里 `//` 与 `/* */` **不是**注释 —— 而清单/配置里 `http://` 就带 `//`，
+        拿 Java 那套去摘会把真代码剪坏（剪坏了反而"看不出来"，因为断言只是字符串查找）。
+      · 反过来说，XML 的 `<!-- -->` 在 Java 那套规则下**一点都不会被摘掉**。
+
+    为什么非摘不可（反向验证抓出来的第二条，跟 Java 那条同一个病）：
+      `AndroidManifest.xml` 顶上有一大块说明注释，把 `REQUEST_INSTALL_PACKAGES`、
+      `enableOnBackInvokedCallback`、`networkSecurityConfig`、`FileProvider`…
+      几乎全提到的词挨个复述了一遍。于是"把真正的 `<uses-permission>` 删掉"
+      这条拆坏**测试照绿** —— 断言被注释喂饱了。
+      资源 XML 同理：`file_paths.xml` 注释里有 `update/`，
+      `network_security_config.xml` 注释里连 `cleartextTrafficPermitted="true"`
+      和 `127.0.0.1` 都有（那段注释就是在讲"退路是改成 base-config"）。
+
+    一句话：**凡是"在源码/配置里找某个字符串"的检查，都要先摘掉注释再找 ——
+    摘哪种注释，取决于文件类型。**
+    """
+    return re.sub(r'<!--[\s\S]*?-->', '', text)
+
+
 # ============================================================================
 #  假环境
 # ============================================================================
@@ -227,11 +250,16 @@ def _boot(tmp, **kw):
     fake = kw.pop('fake', None) or FakeGet(pages={ARTICLE_URL: article()})
     album = kw.pop('album', None) or FakeAlbum(os.path.join(tmp, 'album'))
     seed = kw.pop('settings', None)
+    #: 本机版本号与下载注入点都要能换：更新检查现在**比版本号**，
+    #: 写死一个版本号就没法验"本机比远端新/旧/一样"这三种情形。
+    version = kw.pop('version', '9.9.9')
+    opener = kw.pop('apk_opener', None)
     if seed is not None:
         # 偏好是 Engine 构造时从磁盘读的 —— 所以要在 start() 之前落盘才算数
         with open(os.path.join(tmp, web.SETTINGS_FILE), 'w', encoding='utf-8') as f:
             json.dump(seed, f, ensure_ascii=False)
-    port = web.start(root=tmp, version='9.9.9', get=fake, publish=album, **kw)
+    port = web.start(root=tmp, version=version, get=fake, publish=album,
+                     apk_opener=opener, **kw)
     return Client(port), fake, album
 
 
@@ -789,14 +817,16 @@ def test_pick_source():
 #  四、P3：版本更新检测
 # ============================================================================
 
-#: 更新检测用的假 GitHub 响应。远端那次构建比本机装上的时刻晚 12 分钟 ——
-#: 这样"有新版 / 没新版"两侧都有明确用例，而不是碰运气。
+#: 更新检测用的假 GitHub 响应。
+#: 远端那次构建比本机装上的时刻晚 12 分钟 —— 这样"有新版 / 没新版"两侧
+#: 都有明确用例，而不是碰运气。
 APK_ASSET = 'ImgSnag_1.10.0_android_arm64.apk'
 APK_CREATED = '2026-10-06T07:12:33Z'        # 远端那个安装包的构建时刻（UTC）
 APK_INSTALLED = '2026-10-06T07:00:00Z'      # 本机上装着的那一份的时刻（UTC）
 
 
-def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest'):
+def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest', digest='',
+                 size=11500000):
     """GitHub「按 tag 取某个发布」的假响应（只放我们真正会读的字段）。
 
     故意混一个非 .apk 的资产进去：挑错了就会拿一个文本文件的时间去比，
@@ -807,7 +837,15 @@ def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest'):
     早先叫 `checksums.txt`、后来改叫 `aaa-readme.txt`，两次都排在 apk 后面，
     于是"随便挑第一个"这个 bug 被排序盖住了，拆坏用例照样绿
     （反向验证抓出来的，抓了两次才对准）。
+
+    `size` 与下载用例的假字节数**必须一致**：下载完会拿它校验完整性，
+    不一致的话"正常下载"那条用例会被判成"下载不完整"（反过来也一样）。
     """
+    apk = {'name': name, 'size': size,
+           'browser_download_url': 'https://example.invalid/ImgSnag.apk',
+           'created_at': created}
+    if digest:
+        apk['digest'] = digest
     return json.dumps({
         'tag_name': tag,
         'html_url': 'https://github.com/virmuran/ImgSnag-WeChat/releases/tag/apk-latest',
@@ -815,24 +853,28 @@ def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest'):
         'assets': [
             {'name': '0-readme.txt', 'size': 12, 'browser_download_url': '',
              'created_at': '2020-01-01T00:00:00Z'},
-            {'name': name, 'size': 11500000,
-             'browser_download_url': 'https://example.invalid/ImgSnag.apk',
-             'created_at': created},
+            apk,
         ],
     }, ensure_ascii=False)
 
 
 def test_update_check():
-    print('[13] 检查更新：比对"远端安装包的构建时间"与"本机安装时间"')
+    print('[13] 检查更新：比版本号为主、比构建时间为兜底')
     installed = web.iso_ms(APK_INSTALLED)
     check(installed > 0, '测试自己的时间戳算得出来（ISO 末尾带 Z 也要认）')
+    #: 远端那个包的构建时刻，比"本机安装时刻"**早**一小时。
+    #   专供"版本号说了算"的用例：此时若还看时间，就会得出"没更新"。
+    older_build = web.iso_ms(APK_INSTALLED) - 3600_000
 
     tmp = tempfile.mkdtemp()
     try:
         fake = FakeGet(pages={ARTICLE_URL: article(), web.APK_API_URL: release_json()})
-        cli, _, _ = _boot(tmp, fake=fake)
+        # 本机 1.9.0 < 远端 1.10.0
+        cli, _, _ = _boot(tmp, fake=fake, version='1.9.0')
 
-        # ① 正常情况：远端比本机新
+        # ① 版本号说了算：远端版本更高 → 有更新。
+        #    ⚠ 这里远端的构建时间**故意比本机安装时间早一小时** ——
+        #    如果代码还在"比时间"，本条会红。这就是这次改造的重点。
         r = cli.json(f'/api/update?at={installed}&force=1')
         check(r['ok'], f'问到了远端信息：{r.get("error")!r}')
         eq(r['remote_version'], '1.10.0', '版本号从资产名里读出来（tag 里没有版本号）')
@@ -843,50 +885,79 @@ def test_update_check():
         local = datetime.fromisoformat(APK_CREATED.replace('Z', '+00:00')).astimezone()
         check(local.strftime('%H:%M') in r['remote_time'],
               f'时间按本地时区显示：{r["remote_time"]!r} 该包含 {local.strftime("%H:%M")}')
-        check(r['has_update'], '远端比本机新 → 提示有更新')
+        check(r['has_update'], '远端版本更高 → 有更新（哪怕远端构建时间更早）')
         check('github.com' in r['page_url'], '给出的是去下载的页面')
+        eq(r['apk_name'], APK_ASSET, '把要下载的资产名一起带回来')
+        eq(r['apk_url'], 'https://example.invalid/ImgSnag.apk', '下载地址带回来了')
+        eq(r['apk_size'], 11500000, '字节数带回来了（下载完要拿它校验完整性）')
 
-        # ② 本机那份比远端还新（用户自己装了更新的包）→ 不能说有更新
-        newer = web.iso_ms(APK_CREATED) + 3600_000
-        check(not cli.json(f'/api/update?at={newer}&force=1')['has_update'],
-              '本机更新时不能说"有新版本"')
+        # ② 本机版本更高（用户自己装了更新的包）→ 不能说有更新，
+        #    哪怕远端那个包**构建时间更晚**（这条反过来钉住"不再只看时间"）
+        web.stop()
+        cli2, _, _ = _boot(tmp, fake=fake, version='1.11.0')
+        r2 = cli2.json(f'/api/update?at={installed}&force=1')
+        check(not r2['has_update'],
+              '本机版本更高时不提示更新（旧行为：只看时间会误报）')
 
-        # ③ 宽限期：只差 30 秒不算。手机时钟与 GitHub 服务器总有几秒差，
-        #    不留余量的话"刚装完就提示有新版本"会一直出现，用户就学会无视它了
+        # ③ 版本号相同 + 远端构建更晚 → 仍要提示（同版本号重新构建过的情况）
+        web.stop()
+        cli3, _, _ = _boot(tmp, fake=fake, version='1.10.0')
+        check(cli3.json(f'/api/update?at={installed}&force=1')['has_update'],
+              '版本号相同但远端构建更晚 → 提示更新（滚动预发布位会重新构建）')
+
+        # ④ 宽限期：版本号相同、时间只差 30 秒 → 不算。
+        #    手机时钟与 GitHub 服务器总有几秒差，不留余量的话"刚装完就提示有新版本"
+        #    会一直出现，用户就学会无视它了。
         edge = web.iso_ms(APK_CREATED) - 30_000
-        check(not cli.json(f'/api/update?at={edge}&force=1')['has_update'],
-              '只差几十秒不算更新（留着宽限期）')
+        check(not cli3.json(f'/api/update?at={edge}&force=1')['has_update'],
+              '版本号相同、时间只差几十秒 → 不算更新（留着宽限期）')
 
-        # ④ 问不到本机安装时间（在电脑浏览器里调试就是这样）→ 只报远端，不下结论
-        r4 = cli.json('/api/update?force=1')
-        check(r4['ok'] and r4['unknown'], '问不到安装时间时如实说"不知道"')
-        check(not r4['has_update'], '不知道的时候不能乱说有更新')
-        eq(r4['remote_version'], '1.10.0', '但仍然把远端版本号报出来')
+        # ⑤ 远端资产名里认不出版本号 → 退回比时间（老办法还得在）
+        web.stop()
+        fake2 = FakeGet(pages={ARTICLE_URL: article(),
+                               web.APK_API_URL: release_json(name='ImgSnag_android.apk')})
+        cli4, _, _ = _boot(tmp, fake=fake2, version='1.9.0')
+        r5 = cli4.json(f'/api/update?at={installed}&force=1')
+        eq(r5['remote_version'], '', '认不出来就是空串，不硬猜')
+        check(r5['has_update'], '版本号认不出来时退回比时间：远端更晚 → 有更新')
 
-        # ④′ 安装时间明显不合理（时间戳被 int 截断成负数、或手机时钟跑飞）→ 当"问不到"。
+        # ⑥ 本机版本号读不到（浏览器里调试 / 打包异常）→ 退回比时间；
+        #    连安装时间也拿不到时，只报远端，**不下结论**
+        web.stop()
+        cli5, _, _ = _boot(tmp, fake=fake2, version='')
+        r6 = cli5.json('/api/update?force=1')
+        check(r6['ok'] and r6['unknown'], '两个判据都拿不到时如实说"不知道"')
+        check(not r6['has_update'], '不知道的时候不能乱说有更新')
+        eq(r6['remote_version'], '', '但仍然把远端信息报出来（版本号认不出就是空）')
+
+        # ⑥′ 安装时间明显不合理（时间戳被 int 截断成负数、或手机时钟跑飞）→ 当"问不到"。
         #     不设防的话：负数在布尔判断里是"真"，会算出"永远有新版本"。
-        r5 = cli.json('/api/update?at=-12345&force=1')
-        check(not r5['has_update'], '安装时间被截断成负数时不能报有更新')
-        check(r5['unknown'], '这种时候应该老实说"不知道"')
+        r7 = cli5.json('/api/update?at=-12345&force=1')
+        check(not r7['has_update'], '安装时间被截断成负数时不能报有更新')
+        check(r7['unknown'], '这种时候应该老实说"不知道"')
 
-        # ⑤ 节流：不带 force 的重复请求不该再联网
-        before = fake.hits('api.github.com')
+        # ⑦ 节流：不带 force 的重复请求不该再联网
+        web.stop()
+        cli6, fake3, _ = _boot(tmp, fake=fake, version='1.9.0')
+        cli6.json(f'/api/update?at={installed}&force=1')
+        before = fake3.hits('api.github.com')
         check(before > 0, '确实问过 GitHub')
-        cli.json('/api/update')
-        cli.json('/api/update')
-        eq(fake.hits('api.github.com'), before, '节流生效：短时间内不再联网')
-        cli.json('/api/update?force=1')
-        eq(fake.hits('api.github.com'), before + 1, '手动点「检查」绕过节流')
+        cli6.json('/api/update')
+        cli6.json('/api/update')
+        eq(fake3.hits('api.github.com'), before, '节流生效：短时间内不再联网')
+        cli6.json('/api/update?force=1')
+        eq(fake3.hits('api.github.com'), before + 1, '手动点「检查」绕过节流')
 
-        # ⑥ 节流要跨启动生效（存盘），否则每开一次 App 就问一遍 GitHub
+        # ⑧ 节流要跨启动生效（存盘），否则每开一次 App 就问一遍 GitHub
         state = json.loads(read(os.path.join(tmp, web.UPDATE_FILE)))
         eq(state.get('remote_version'), '1.10.0', '最近一次结果落了盘')
         check(state.get('_at'), '落盘里带了检查时刻（下次启动据此决定要不要再问）')
+        check(state.get('apk_url'), '连"要下载哪个文件"也一起存了（点更新时不必再查一遍）')
     finally:
         web.stop()
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # ⑦ 接口问不通：要说人话，而且不能把服务带崩
+    # ⑨ 接口问不通：要说人话，而且不能把服务带崩
     tmp2 = tempfile.mkdtemp()
     try:
         cli2, _, _ = _boot(tmp2, fake=FakeGet(pages={ARTICLE_URL: article()}))
@@ -901,6 +972,202 @@ def test_update_check():
     finally:
         web.stop()
         shutil.rmtree(tmp2, ignore_errors=True)
+
+
+#: 假安装包的字节（不大，但够分几块下；内容随意 —— 验的是流程与校验）
+APK_BYTES = b'\x50\x4b\x03\x04' + b'A' * 40000
+
+
+class FakeApkOpener:
+    """假安装包下载：像真网络那样**分块**给，还能按需放慢、截断、报错。
+
+    真实现（urllib 的 opener）也是这样用的：`opener.open(req, timeout=...)`
+    拿到的对象能 `read(n)`、能从 headers 里读 Content-Length。
+    假替身的签名必须与真的一致 —— 否则测试全绿、真机一跑就炸
+    （桌面版在这条上踩过：注入契约写错，真联网那条路从没被走到）。
+    """
+
+    def __init__(self, data=APK_BYTES, chunk=4096, delay=0.0, drop=None,
+                 http=None, length=None):
+        self.data = data
+        self.chunk = chunk
+        self.delay = delay
+        #: 只给前 drop 个字节（模拟企业网络把长响应截断）
+        self.drop = drop
+        #: 抛 HTTPError（模拟 404/403）
+        self.http = http
+        self.length = length
+        self.calls = []
+
+    def open(self, req, timeout=None):
+        self.calls.append(getattr(req, 'full_url', str(req)))
+        if self.http:
+            raise urllib.error.HTTPError(getattr(req, 'full_url', ''), self.http,
+                                         'fake', None, None)
+        data = self.data if self.drop is None else self.data[:self.drop]
+        return _FakeApkResp(data, self.chunk, self.delay, self.length)
+
+
+class _FakeApkResp:
+    """够用的假响应：read(n) 分块、headers 里给 Content-Length、可当上下文管理器。"""
+
+    def __init__(self, data, chunk, delay, length):
+        self.data = data
+        self.chunk = chunk
+        self.delay = delay
+        self.pos = 0
+        self.status = 200
+        self.headers = {}
+        if length is not None:
+            self.headers['Content-Length'] = str(length)
+
+    def read(self, n=None):
+        if self.delay:
+            time.sleep(self.delay)
+        if self.pos >= len(self.data):
+            return b''
+        step = len(self.data) - self.pos if n is None else min(n, self.chunk)
+        out = self.data[self.pos:self.pos + step]
+        self.pos += step
+        return out
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_update_download():
+    print('[14] 应用内更新：下载 → 校验 → 落到该落的地方（真服务，假下载）')
+    installed = web.iso_ms(APK_INSTALLED)
+    sha = 'sha256:' + hashlib.sha256(APK_BYTES).hexdigest()
+
+    def wait_dl(cli, timeout=20):
+        end = time.time() + timeout
+        d = cli.json('/api/state')['dl']
+        while time.time() < end and d.get('phase') not in ('done', 'error'):
+            time.sleep(0.05)
+            d = cli.json('/api/state')['dl']
+        return d
+
+    def case(opener, digest=sha, size=None):
+        """起一套全新环境。
+
+        ⚠ **每块用例各自一个数据目录**：更新检查的结果是落盘的（节流要跨启动
+        生效），共用一个目录时第二块用例会直接拿到上一块缓存的下载地址和摘要 ——
+        那时改假响应里的 sha256 压根不生效，用例看着绿、其实什么都没验到。
+        """
+        tmp = tempfile.mkdtemp()
+        files = os.path.join(tmp, 'appfiles')            # 假装是安卓的应用私有目录
+        os.makedirs(files, exist_ok=True)
+        fake = FakeGet(pages={
+            ARTICLE_URL: article(),
+            web.APK_API_URL: release_json(digest=digest,
+                                          size=len(APK_BYTES) if size is None else size),
+        })
+        web.stop()
+        cli, _, _ = _boot(tmp, fake=fake, version='1.9.0', files_dir=files,
+                          apk_opener=opener)
+        return tmp, files, cli
+
+    # ① 正常下载一遍
+    tmp, files, cli = case(FakeApkOpener())
+    try:
+        eq(cli.json('/api/state')['dl']['phase'], 'idle', '一开始没有下载任务')
+        # 还没检查过也能直接点「更新」：后端自己补一次检查（用户不该被要求先点检查）
+        r = cli.post('/api/update/download', {'at': installed})
+        check(r.get('phase') == 'downloading', f'下载受理了：{r}')
+        d = wait_dl(cli)
+        eq(d['phase'], 'done', f'下载完成（失败原因：{d.get("error")!r}）')
+        eq(d['done'], len(APK_BYTES), '进度报的字节数 = 实际拿到的字节数')
+        eq(d['version'], '1.10.0', '状态里带着这次下的是哪个版本')
+
+        # 文件落在**传进来的那个目录**下的 update/ 里（安卓上就是 FileProvider
+        # 开放的那一层）。落错地方的表现是"下载完成、点安装报文件不存在"，
+        # 而且只在真机上才暴露 —— 所以这里连目录名一起钉住。
+        check(d['path'].startswith(files + os.sep),
+              f'落在 files_dir 下：{d["path"]}')
+        check(os.sep + web.UPDATE_DIR_NAME + os.sep in d['path'],
+              f'目录名就是约定那个：{d["path"]}')
+        eq(os.path.basename(d['path']), APK_ASSET, '文件名用 GitHub 上那个名字')
+        eq(open(d['path'], 'rb').read(), APK_BYTES, '下来的字节与远端一致')
+        check(not os.path.exists(d['path'] + '.part'), '下完不留半截文件')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ② 三种失败：截断 / 摘要不符 / 地址 404 —— 都必须报错并且**不留下半截文件**
+    for title, cfg, digest, needle in (
+        ('被截断（企业网络出口常见）', dict(opener=FakeApkOpener(drop=20000)), sha, '不完整'),
+        ('摘要对不上（传输途中被改）', dict(opener=FakeApkOpener()), 'sha256:' + '0' * 64, '校验'),
+        ('下载地址 404', dict(opener=FakeApkOpener(http=404)), sha, '404'),
+    ):
+        tmp, files, cli = case(opener=cfg['opener'], digest=digest)
+        try:
+            cli.post('/api/update/download', {'at': installed})
+            d = wait_dl(cli)
+            eq(d['phase'], 'error', f'{title} → 报错')
+            check(needle in d['error'], f'{title} 的原因说得清：{d["error"]!r}')
+            check('Traceback' not in d['error'] and 'URLError' not in d['error'],
+                  f'{title}：给的是人话，不是异常原文：{d["error"]!r}')
+            check(not os.path.exists(os.path.join(files, web.UPDATE_DIR_NAME, APK_ASSET)),
+                  f'{title}：没把半截文件留在下载目录里冒充成品')
+            # ⚠ 光查"成品名不存在"太弱：半截文件叫 `<名字>.part`，失败后不删它也照样
+            #   满足上面那条（反向验证抓出来的）。所以整目录必须空。
+            upd_dir = os.path.join(files, web.UPDATE_DIR_NAME)
+            eq([], sorted(os.listdir(upd_dir)) if os.path.isdir(upd_dir) else [],
+               f'{title}：下载目录里什么都不剩（半截的 .part 也不留）')
+        finally:
+            web.stop()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ③ 取消（手机上流量贵，下到一半反悔是常事）
+    tmp, files, cli = case(FakeApkOpener(chunk=2048, delay=0.05))
+    try:
+        cli.post('/api/update/download', {'at': installed})
+        eq(cli.json('/api/state')['dl']['phase'], 'downloading', '确实在下载中')
+        r = cli.post('/api/update/cancel', {})
+        check(r['phase'] in ('idle', 'downloading'), f'取消被受理：{r}')
+        d = r
+        end = time.time() + 10
+        while time.time() < end and d.get('phase') == 'downloading':
+            time.sleep(0.05)
+            d = cli.json('/api/state')['dl']
+        eq(d['phase'], 'idle', '取消后回到空闲态（界面据此变回「更新」）')
+        left = os.path.join(files, web.UPDATE_DIR_NAME)
+        check(not (os.path.isdir(left) and os.listdir(left)),
+              f'取消后不留半截文件：{os.listdir(left) if os.path.isdir(left) else "（目录都没有）"}')
+
+        # ④ 页面拿进度不用另开轮询：通用状态里就带着 dl
+        check('dl' in cli.json('/api/state'), '通用状态里带了 dl 字段')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ⑤ 下完新包要把**上一个**删掉。
+    #    资产名里带版本号，所以新包不会覆盖上一版、而是并排躺着 ——
+    #    不删的话每更新一次就在应用私有目录里多留一个 ~20MB 的包，
+    #    而且**完全无声**（用户只会隐约觉得"App 怎么越来越大"）。
+    #    顺带验残留的 `.part` 一起扫掉（取消/进程被杀会留下）。
+    tmp, files, cli = case(FakeApkOpener())
+    try:
+        upd_dir = os.path.join(files, web.UPDATE_DIR_NAME)
+        os.makedirs(upd_dir, exist_ok=True)
+        for n in ('ImgSnag_1.9.0_android_arm64.apk',        # 上一版
+                  'ImgSnag_1.8.0_android_arm64.apk.part'):  # 更早一次留下的半截
+            with open(os.path.join(upd_dir, n), 'wb') as f:
+                f.write(b'x' * 32)
+
+        cli.post('/api/update/download', {'at': installed})
+        d = wait_dl(cli)
+        eq(d['phase'], 'done', f'下好了（失败原因：{d.get("error")!r}）')
+        eq(sorted(os.listdir(upd_dir)), [APK_ASSET],
+           '下载目录里只剩这一次下好的那个（旧版本与半截文件都清掉了）')
+        eq(open(d['path'], 'rb').read(), APK_BYTES, '留下的那个是完整的新包')
+    finally:
+        web.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ============================================================================
@@ -1064,15 +1331,68 @@ def test_java_contract():
     check(m is not None, 'Java 调用了 start(...)')
     if m:
         check('VERSION_NAME' in m.group(1), 'Java 把版本号一起传了进去')
+    # ⚠ 应用私有目录必须**由 Java 显式传**（不靠 Python 猜 HOME 在哪）：
+    #   Python 猜错的表现是"下载完成、点安装报文件不存在"，只在真机上暴露。
+    check(re.search(r'new\s+Kwarg\(\s*"files_dir"\s*,\s*[^)]*getFilesDir\(\)', main)
+          is not None,
+          'Java 把应用私有目录（filesDir）作为 files_dir 传给 Python')
+    check('com.chaquo.python.Kwarg' in main, '用 Chaquopy 的关键字参数（不是位置参数硬塞）')
+
+    # ⑥′ 应用内更新的三方约定：目录名在 Java / 清单 / Python 三处必须一字不差
+    man = strip_xml_comments(read(os.path.join(SRC_MAIN, 'AndroidManifest.xml')))
+    m = re.search(r'UPDATE_DIR\s*=\s*"([^"]+)"', main)
+    check(m is not None, 'Java 里声明了更新包目录名')
+    if m:
+        eq(m.group(1), web.UPDATE_DIR_NAME, 'Java 的目录名与 Python 一致')
+        eq(m.group(1), 'update', '目录名就是 update（换了要三处一起换）')
+    paths_xml = os.path.join(SRC_MAIN, 'res', 'xml', 'file_paths.xml')
+    check(os.path.exists(paths_xml), 'FileProvider 的路径配置在（没有它安装器读不到包）')
+    if os.path.exists(paths_xml):
+        body = strip_xml_comments(read(paths_xml))
+        eq(re.findall(r'path="([^"]+)"', body), [web.UPDATE_DIR_NAME + '/'],
+           'FileProvider 只开放 update/ 这一个子目录（不是整个 files 目录）')
+        check('files-path' in body, '基准目录是 getFilesDir()，与 Java 传的那个一致')
+    check('androidx.core.content.FileProvider' in man,
+          '清单里用的是 FileProvider（安卓 7 起 file:// 不能跨应用传文件）')
+    check('android.support.FILE_PROVIDER_PATHS' in man, 'FileProvider 指向了路径配置')
+    check('REQUEST_INSTALL_PACKAGES' in man,
+          '清单里声明了装包权限（安卓 8 起没它装不了）')
+    check('grantUriPermissions="true"' in man, '允许把这个 uri 临时授权给安装器')
+    check('exported="false"' in man, 'FileProvider 不对外暴露')
+
+    # ⑥‴ 装包的安全边界：只认自己下载目录里的文件。桥的入参来自网页，
+    #     而网页的内容来自抓来的文章 —— 白名单一条比事后追查便宜得多。
+    #     只查"方法存在"太弱（空实现照样有那个签名），得钉住判据本身。
+    check(re.search(r'private\s+boolean\s+inUpdateDir\s*\(', main) is not None,
+          'Java 侧有"这个文件在自己下载目录里吗"的判断')
+    check(re.search(r'if\s*\(\s*!inUpdateDir\([^)]*\)', main) is not None,
+          '安装前真的拿这个判断拦了一道（不是写了却不用）')
+    check('getCanonicalPath' in main,
+          '用规范路径比较（`..` 与软链接绕不过去）')
+    check(re.search(r'private\s+boolean\s+canRequestInstall\s*\(', main) is not None,
+          '有"用户给过安装权限没有"的判断')
+    check('ACTION_MANAGE_UNKNOWN_APP_SOURCES' in main,
+          '没授权时把用户送去系统设置页（不送的话点了没反应）')
+    check('onResume' in main and 'pendingInstallPath' in main,
+          '授权回来会接着装（不接着装就像"点了安装什么都没发生"）')
+    check('FLAG_GRANT_READ_URI_PERMISSION' in main,
+          '给安装器显式授权读那个 uri（少它＝安装器报"解析包时出现问题"）')
+
+    # ⑥″ 网页侧：装包这条路得真的接上桥，并且**留着"去网页下载"的兜底**
+    check('canInstall' in webui.PAGE and 'install(' in webui.PAGE,
+          '页面会调桥上的安装方法')
+    check("'/api/update/download'" in webui.PAGE, '页面会发起应用内下载')
+    check("'/api/update/cancel'" in webui.PAGE, '页面能取消下载')
+    check('id="updWeb"' in webui.PAGE, '页面上留了"去网页下载"的兜底入口')
 
     # ⑥ 主路还在：分享意图 + 回环明文放行
-    man = read(os.path.join(SRC_MAIN, 'AndroidManifest.xml'))
+    man = strip_xml_comments(read(os.path.join(SRC_MAIN, 'AndroidManifest.xml')))
     check('android.intent.action.SEND' in man, '清单里仍然接收分享')
     check('android:networkSecurityConfig' in man, '清单里指向了网络安全配置')
     nsc = os.path.join(SRC_MAIN, 'res', 'xml', 'network_security_config.xml')
     check(os.path.exists(nsc), '网络安全配置文件存在')
     if os.path.exists(nsc):
-        body = read(nsc)
+        body = strip_xml_comments(read(nsc))
         check('127.0.0.1' in body, '放行的是回环地址')
         check('cleartextTrafficPermitted="true"' in body, '明确放行明文')
         eq(len(re.findall(r'<domain[ >]', body)), 1,
@@ -1091,9 +1411,10 @@ def test_java_contract():
     check(re.search(r'Build\.VERSION\.SDK_INT\s*>=\s*Build\.VERSION_CODES\.TIRAMISU',
                     main) is not None,
           '注册前判了系统版本（不判的话老系统上找不到那些新类，一进就崩）')
-    # ⚠ manifest 的注释里也写着 enableOnBackInvokedCallback 这个词（就为了讲清
+    # ⚠ 清单的注释里也写着 enableOnBackInvokedCallback 这个词（就为了讲清
     #   为什么要有它），所以不能光查这个词 —— 得连属性名一起查。
-    #   `strip_comments` 摘的是 Java 的注释，摘不掉 XML 的 `<!-- -->`。
+    #   `man` 已经过 `strip_xml_comments`（见那个函数的说明），这一条就算不退让
+    #   也拦得住；留着完整属性名是双保险。
     check('android:enableOnBackInvokedCallback="true"' in man,
           '清单里显式声明了预测性返回（免得日后动 targetSdk 时行为悄悄变回去）')
     # 光查"字段名出现过"太弱：字段声明还在、但 handleBack 里不再看它，
@@ -1116,14 +1437,22 @@ def test_java_contract():
         check('history.replaceState' in body.group(0),
               '翻页走 replaceState（同一层里换内容）')
 
-    # 桥上的五个方法：JS 调的每一个都得标注解，否则点了一动不动
-    for meth in ('read', 'copy', 'depth', 'open', 'installedAt'):
-        got = re.search(r'public\s+[\w<>\[\]]+\s+' + meth + r'\s*\(', main)
-        check(got is not None, f'桥上有 {meth}() 方法')
-        if got:
-            head = main[max(0, got.start() - 160):got.start()]
-            check('@JavascriptInterface' in head,
-                  f'{meth}() 标了 @JavascriptInterface（不标＝JS 调不到，还不报错）')
+    # 桥上的七个方法：JS 调的每一个都得标注解，否则点了一动不动
+    #
+    # ⚠ 这里**不能**用"在方法签名前面 160 个字符里找 `@JavascriptInterface`"那种写法。
+    #   两个方法挨着写的时候，前一个的注解正好落在这个窗口里 —— 把后一个的注解删掉，
+    #   断言照样绿（反向验证抓出来的，第 3 条）。
+    #   改成**贴着查**：注解 → （可夹别的注解）→ public → 返回类型 → 方法名 → `(`。
+    #   `[^;{}]` 是关键：它挡住"跨过方法体、跳到下一个方法的注解上"这条路。
+    #   （`installedAt()` 真的夹了一个 `@SuppressWarnings("deprecation")`，
+    #    所以中间那截不能省。）
+    for meth in ('read', 'copy', 'depth', 'open', 'installedAt',
+                 'canInstall', 'install'):
+        check(re.search(r'public\s+[\w<>\[\]]+\s+' + meth + r'\s*\(', main) is not None,
+              f'桥上有 {meth}() 方法')
+        check(re.search(r'@JavascriptInterface[^;{}]{0,120}?'
+                        r'public\s+[\w<>\[\]]+\s+' + meth + r'\s*\(', main) is not None,
+              f'{meth}() 标了 @JavascriptInterface（不标＝JS 调不到，还不报错）')
     bridge = re.search(r'BRIDGE_NAME\s*=\s*"([^"]+)"', main)
     check(bridge is not None, 'Java 里定义了注入给网页的对象名')
     # 两边的名字要**互相**对得上。别用 `f'window.{name}' in PAGE` 这种写法：
@@ -1193,7 +1522,8 @@ def main():
     for fn in (test_helpers, test_full_chain, test_share_push, test_dedup_and_partial,
                test_partial_download, test_errors, test_net_failure_falls_back,
                test_album_failure, test_inspect_tiny, test_quality_toggle,
-               test_settings, test_pick_source, test_update_check, test_page_contract,
+               test_settings, test_pick_source, test_update_check, test_update_download,
+               test_page_contract,
                test_java_contract, test_isolation):
         try:
             fn()

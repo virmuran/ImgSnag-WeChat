@@ -26,9 +26,23 @@
 **与 Java 的握手点只有三个**，测试逐条钉住：
     ① 相册入库：本模块调 `Gallery.publishDir(ctx, 目录, 相册子目录)`，拿回成功张数
     ② 分享投递：Java 调 `push_share(文本)`
-    ③ 启动：Java 调 `start(ctx, 版本号)`，拿回端口
+    ③ 启动：Java 调 `start(ctx, 版本号, files_dir=应用私有目录)`，拿回端口
 除这三处之外两边互不依赖 —— Java 越薄，能出错的地方越少。
-（页面里那个「从剪贴板」按钮走的是 WebView 的只读 JS 桥，不经过本模块。）
+（页面里那个「从剪贴板」按钮、以及**装更新包**走的是 WebView 的 JS 桥，不经过本模块。）
+
+────────────────────────────────────────────────────────────────────────
+应用内更新（安卓版）
+────────────────────────────────────────────────────────────────────────
+流程：检查版本（比版本号）→ 用户点「更新」→ 本模块下载 APK 到
+`<files_dir>/update/`（**必须**落在 Java 侧 FileProvider 声明过的那个目录里，
+否则装的时候会报"文件不存在"，而且只在真机上暴露）→ 校验大小与 sha256 →
+网页调 Java 桥 `install(路径)` 交给系统安装器。
+
+为什么下载放 Python 而不是 Java：这套逻辑能在电脑上跑测试（假网络 + 假文件），
+而 Java 那侧一行都验不了。Java 只留"最后一步"：把文件交给系统安装器。
+
+失败一定要**说人话**并**留着网页下载这条路**：手机网络下 GitHub 的下载 CDN
+未必连得上（桌面版实测过连不上的情况），那时用户至少还能点「去网页下载」。
 
 ────────────────────────────────────────────────────────────────────────
 偏好：小图过滤与保存画质
@@ -76,6 +90,8 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -167,6 +183,23 @@ UPDATE_SLACK_MS = 60 * 1000
 #: 而负数在布尔判断里是"真" —— 结果就是每次检查都报"有新版本"，
 #: 比老实说"不知道"糟得多。手机时钟跑飞了也被这一条兜住。
 MIN_INSTALL_MS = 1577836800000
+
+#: 应用内更新的安装包目录名。**必须是 Java 侧 FileProvider 声明过的那个子目录**
+#: （`res/xml/file_paths.xml` 里的 `<files-path path="update/">`，
+#: 与 `MainActivity.UPDATE_DIR` 同名）。三处不一致的表现是「下载完成、点安装却
+#: 报文件不存在」，而且只在真机上才暴露 —— 测试把这三处钉在一起。
+UPDATE_DIR_NAME = 'update'
+
+#: 下载安装包时每次读多少（64 KB：进度条够顺，又不至于把时间耗在 syscall 上）
+APK_CHUNK = 64 * 1024
+
+#: 下载安装包的超时（秒）。安装包有二十多兆，比问接口宽松得多 ——
+#: 手机上慢网常见，超时给短了表现是"总是下载失败"，用户只能反复重试。
+APK_TIMEOUT = 120
+
+#: 下载安装包的 User-Agent。GitHub 的资产下载地址对空 UA 不友好，
+#: 而且带上一眼能看出是谁在下（对端日志里好认）。
+APK_USER_AGENT = 'ImgSnag-Android'
 
 
 # ============================================================================
@@ -351,6 +384,40 @@ def normalize_settings(raw) -> dict:
     return out
 
 
+def _dl_idle() -> dict:
+    """下载状态的初始值（也用于取消/失败后的复位）。
+
+    状态机：idle → downloading → done
+                            ↘ error（带人话原因）
+    字段给界面用：`done`/`total` 是字节数（total 为 0 时显示"不确定进度"），
+    `path` **只在 done 时才有值** —— 界面上「安装」按钮就靠它判断能不能点。
+    """
+    return {'phase': 'idle', 'done': 0, 'total': 0, 'error': '',
+            'path': '', 'name': '', 'version': ''}
+
+
+def _net_error_text(exc: Exception) -> str:
+    """把网络异常翻成手机用户看得懂的一句话。
+
+    安卓上没有控制台可看，用户唯一的线索就是这句话；所以宁可比"网络错误"
+    具体一点，也别把 urllib 的英文原文直接扔出去。
+    """
+    import socket                                                   # noqa: PLC0415
+    if isinstance(exc, urllib.error.HTTPError):
+        return f'下载地址返回 HTTP {exc.code}（安装包可能已被替换或删除，稍后再试）'
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, 'reason', exc)
+        if isinstance(reason, socket.timeout):
+            return '下载超时了，换个网络（或连上 Wi-Fi）再试一次'
+        text = str(reason)
+        if 'CERTIFICATE' in text.upper() or 'certificate' in text:
+            return '证书校验没过（像是网络被中转），换个网络再试一次'
+        return f'连不上下载地址：{text}'
+    if isinstance(exc, socket.timeout):
+        return '下载超时了，换个网络（或连上 Wi-Fi）再试一次'
+    return str(exc) or type(exc).__name__
+
+
 @dataclass
 class Item:
     """一张待处理的图：两个档位的地址都留着，用哪档由调用方决定。"""
@@ -386,6 +453,18 @@ class Failed(Exception):
 #  会话引擎
 # ============================================================================
 
+class _Cancelled(Exception):
+    """用户取消了下载（下载线程用它把自己干净地收尾）。"""
+
+
+def _silent_remove(path: str):
+    """删掉半截文件；删不掉也不报（它只会占一点空间，下次会被覆盖）。"""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 class Engine:
     """一次「解析 → 挑图 → 保存」的过程，以及它在磁盘上的缓存。
 
@@ -396,7 +475,8 @@ class Engine:
     ready 与 saved 两个状态 —— 不允许"只能保存一次"，那是数据丢失式的设计。
     """
 
-    def __init__(self, root=None, get=None, publish=None, when=None, version=''):
+    def __init__(self, root=None, get=None, publish=None, when=None, version='',
+                 files_dir=None, apk_opener=None):
         self.root = root or os.path.expanduser('~')
         os.makedirs(self.root, exist_ok=True)
         #: 注入点：测试用假网络、假相册；None = 走真实实现
@@ -407,6 +487,18 @@ class Engine:
         #: 留着 None 会炸在 "'NoneType' object is not callable"（测试当场抓到过）。
         self.when = when or (lambda: None)
         self.version = version
+
+        #: 应用内更新的安装包落在这个目录。安卓侧由 Java 把应用私有目录显式传进来
+        #: （FileProvider 就声明在那里）；桌面/测试环境退回数据目录 —— 这条回退
+        #: 只是为了能在电脑上跑起来，安卓上的下载目录永远以传进来的为准。
+        self.update_dir = os.path.join(files_dir or self.root, UPDATE_DIR_NAME)
+        #: 注入点：下载安装包用的 opener（测试注入假的，不让它真去下二十兆）
+        self.apk_opener = apk_opener
+        #: 下载状态。**名称必须与任何方法名区分开** —— 早先 `save` 就撞过一次：
+        #: 实例属性把同名方法覆盖掉，调用时当场 "'dict' object is not callable"。
+        self.dl = _dl_idle()
+        #: 用户取消下载的标志。置上之后下载线程自己收尾（删半截文件）。
+        self._dl_cancel = False
 
         self.lock = threading.RLock()
         self._sem = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -480,6 +572,8 @@ class Engine:
                 #: 体检进度；`total` 为 0 或 `running` 为假且 `done` 为 0 时界面不显示
                 'check': {'done': self.inspected, 'total': len(self.items),
                           'running': self.checking},
+                #: 应用内更新的下载进度。挂在通用状态里，页面就不用为它单开一个轮询。
+                'dl': dict(self.dl),
             }
 
     def tiny_indexes(self) -> list:
@@ -1022,9 +1116,16 @@ class Engine:
     def check_update(self, installed_at: int = 0, force: bool = False) -> dict:
         """问 GitHub：`apk-latest` 上那个安装包是不是比本机装的更新。
 
-        判据取**时间**（远端 APK 的创建时间 vs 本机安装时间），不是版本号 ——
-        预发布位的 tag 就叫 `apk-latest`，里面没有版本号；而且版本号在
-        "同版本号重新构建"时不会变，那恰恰是迭代期最常发生的情况。
+        **判据是版本号**（从资产名里抠出来，形如
+        `ImgSnag_1.11.0_android_arm64.apk`）—— 滚动发布位的 tag 里没有版本号，
+        但文件名里有，这是当初只能"比构建时间"之后补上的更准的一条路。
+
+        构建时间降级为**兜底**，只在两种情况下用：
+          · 两边有一边的版本号认不出来（改过命名规则、老包没有版本号）
+          · 版本号相同 —— tag 与版本号都没变但重新构建过（迭代期很常见），
+            这时"构建时间比本机安装时间新"就是唯一能发现更新的线索
+        比较逻辑用 `updater.compare_versions`（三端**同一份**实现），
+        不在这儿另写一套。
 
         `installed_at` 由 Java 侧给（`PackageManager` 的 lastUpdateTime）。
         拿不到时（浏览器里调试、桥不在）返回 `unknown=True`：界面只报远端信息，
@@ -1044,23 +1145,44 @@ class Engine:
 
         info = updater.check_for_updates(fetch=self._update_fetch, api_url=APK_API_URL,
                                          current=self.version)
-        apk = next((a for a in info.assets if a.name.lower().endswith('.apk')), None)
+        apk = self._pick_apk(info.assets)
         remote_ms = iso_ms(apk.created_at) if apk else 0
+        remote_ver = (apk.version if apk else '') or ''
+        local_ver = self.version or ''
+
+        # 能不能用版本号下结论：两边都得是规范三段式（`1.11.0`）。
+        # 认不出来就退回老办法（比构建时间），而不是硬算出一个错的结论。
+        by_version = bool(remote_ver and local_ver
+                          and updater.is_valid_version(remote_ver)
+                          and updater.is_valid_version(local_ver))
+        cmp_version = (updater.compare_versions(local_ver, remote_ver)
+                       if by_version else 0)
+        by_time = bool(remote_ms and installed_at
+                       and remote_ms > installed_at + UPDATE_SLACK_MS)
+        if by_version and cmp_version != 0:
+            has_update = cmp_version < 0                 # 版本号说了算
+        else:
+            # 版本号认不出来，或两边版本号相同（同版本号重新构建过）→ 看时间
+            has_update = by_time
 
         out = {
             'ok': bool(info.ok and apk),
             'cached': False,
             'error': info.error or ('' if apk else 'GitHub 上还没有安卓安装包'),
             'current': self.version,
-            'remote_version': (apk.version if apk else '') or '',
+            'remote_version': remote_ver,
             'remote_time': pretty_time(apk.created_at) if apk else '',
             'remote_ms': remote_ms,
             'installed_ms': installed_at,
-            #: 只有两边的时间都拿得到才敢下结论；宽限期见 UPDATE_SLACK_MS
-            'has_update': bool(remote_ms and installed_at
-                               and remote_ms > installed_at + UPDATE_SLACK_MS),
-            'unknown': bool(remote_ms and not installed_at),
+            'has_update': has_update,
+            #: 只有远端信息拿得到、本机信息拿不到时才是 unknown（见 docstring）
+            'unknown': bool(apk and not installed_at and not by_version),
             'page_url': info.page_url or APK_PAGE_URL,
+            #: 应用内更新要用的三样：地址、字节数、sha256（GitHub 现在直接给摘要）
+            'apk_name': apk.name if apk else '',
+            'apk_url': apk.url if apk else '',
+            'apk_size': int(apk.size or 0) if apk else 0,
+            'apk_sha256': (apk.digest if apk else '') or '',
             '_at': now,
         }
         with self.lock:
@@ -1073,6 +1195,169 @@ class Engine:
             self.log_line(f'更新检查失败：{out["error"]}')
         self._remember_update(out)
         return out
+
+    @staticmethod
+    def _pick_apk(assets) -> object:
+        """从资产里挑出手机该装的那个 APK。
+
+        优先名字里带 arm64 的（本 App 只带 arm64-v8a）—— 将来若同时发布多个 ABI，
+        挑错了的表现是"下载成功但装不上，报与 CPU 不兼容"。
+        """
+        apks = [a for a in (assets or []) if str(a.name).lower().endswith('.apk')]
+        for a in apks:
+            if 'arm64' in str(a.name).lower():
+                return a
+        return apks[0] if apks else None
+
+    # ── ② 应用内更新：下载 ──────────────────────────────────────────────────
+
+    def download_state(self) -> dict:
+        """当前下载状态（网页轮询用；也挂在 state() 的 `dl` 上）。"""
+        with self.lock:
+            return dict(self.dl)
+
+    def start_download(self, installed_at: int = 0, force: bool = False) -> dict:
+        """开始下载安装包（后台线程）。返回此刻的下载状态。
+
+        下载地址等三样（地址/字节数/sha256）取自最近一次检查结果；
+        没有（还没查过、或缓存被清）就先同步查一次 —— 用户点「更新」时
+        不该再让他自己去点一次「检查更新」。
+        """
+        with self.lock:
+            if self.dl.get('phase') == 'downloading':
+                return dict(self.dl)
+            info = dict(self.upd or {})
+
+        if force or not info.get('apk_url'):
+            info = self.check_update(installed_at=installed_at, force=True)
+
+        url = info.get('apk_url') or ''
+        if not url:
+            with self.lock:
+                self.dl = _dl_idle()
+                self.dl.update({'phase': 'error',
+                                'error': info.get('error') or '拿不到安装包的下载地址'})
+                return dict(self.dl)
+
+        with self.lock:
+            self._dl_cancel = False
+            self.dl = _dl_idle()
+            self.dl.update({
+                'phase': 'downloading',
+                'total': as_int(info.get('apk_size'), 0),
+                'name': os.path.basename(str(info.get('apk_name') or 'ImgSnag.apk')),
+                'version': str(info.get('remote_version') or ''),
+            })
+        args = (url, as_int(info.get('apk_size'), 0), str(info.get('apk_sha256') or ''),
+                self.dl['name'], self.dl['version'])
+        threading.Thread(target=self._download_worker, args=args,
+                         name='update-download', daemon=True).start()
+        self.log_line(f'开始下载更新包 {self.dl["name"]}')
+        return self.download_state()
+
+    def cancel_download(self) -> dict:
+        """取消下载：置标志位，由下载线程自己收尾（半截文件一并删掉）。
+
+        不在这里直接杀线程 —— 那样半截文件会留在盘上，下次进来还得判它是不是完整的。
+        """
+        with self.lock:
+            if self.dl.get('phase') == 'downloading':
+                self._dl_cancel = True
+        return self.download_state()
+
+    def _download_worker(self, url: str, size: int, sha256: str,
+                         name: str, version: str):
+        """把安装包下到 `<update_dir>/<资产名>`：边下边算 sha256，下完校验再落位。
+
+        校验这一环不能省：企业网络出口会把长响应截断（桌面版 ChemCal 遇到过
+        在 50 MiB 处被截断），截断的 APK 装上会直接报"解析包时出现问题" ——
+        那时候用户完全想不到是网络的事。
+        """
+        dest = os.path.join(self.update_dir, name or 'ImgSnag.apk')
+        tmp = dest + '.part'
+        try:
+            os.makedirs(self.update_dir, exist_ok=True)
+            opener = self.apk_opener or imgsnag_android.build_opener(cache_dir=self.root)
+            req = urllib.request.Request(url, headers={
+                'User-Agent': f'{APK_USER_AGENT}/{version or "dev"}',
+                'Accept': 'application/octet-stream',
+            })
+            digest = hashlib.sha256()
+            got = 0
+            with opener.open(req, timeout=APK_TIMEOUT) as resp, open(tmp, 'wb') as f:
+                if not size:
+                    size = as_int(resp.headers.get('Content-Length'), 0)
+                self._dl_set(total=size)
+                while True:
+                    if self._dl_cancel:
+                        raise _Cancelled()
+                    chunk = resp.read(APK_CHUNK)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    digest.update(chunk)
+                    got += len(chunk)
+                    self._dl_set(done=got)
+
+            if self._dl_cancel:
+                raise _Cancelled()
+            if size and got != size:
+                raise RuntimeError(f'下载不完整（只拿到 {imgsnag.human_size(got)}，'
+                                   f'应有 {imgsnag.human_size(size)}），请重试')
+            want = (sha256 or '').strip().lower()
+            if want.startswith('sha256:'):
+                want = want.split(':', 1)[1]
+            if want and digest.hexdigest() != want:
+                raise RuntimeError('下载的文件校验不通过（传输途中被改过），已丢弃，请重试')
+
+            os.replace(tmp, dest)                       # 原子落位：半截文件不会冒充成品
+            self._prune_old_apks(dest)
+        except _Cancelled:
+            _silent_remove(tmp)
+            with self.lock:
+                self.dl = _dl_idle()
+            self.log_line('更新包下载已取消')
+            return
+        except Exception as e:                          # noqa: BLE001
+            _silent_remove(tmp)
+            text = _net_error_text(e)
+            with self.lock:
+                self.dl = _dl_idle()
+                self.dl.update({'phase': 'error', 'error': text})
+            self.log_line(f'❌ 更新包下载失败：{text}')
+            return
+
+        with self.lock:
+            self.dl = _dl_idle()
+            self.dl.update({'phase': 'done', 'done': got, 'total': got,
+                            'path': dest, 'name': name, 'version': version})
+        self.log_line(f'更新包已下载：{name}（{imgsnag.human_size(got)}），可以安装了')
+
+    def _prune_old_apks(self, keep: str):
+        """下完新包之后，把上一次那个安装包删掉 —— 只留当下这一个。
+
+        为什么非删不可：资产名里带版本号（`ImgSnag_1.11.0_android_arm64.apk`），
+        所以新包**不会**覆盖上一版，而是并排躺着。每更新一次就在应用私有目录里
+        多留一个 ~20MB 的包，**而且完全无声** —— 用户只会隐约觉得"App 怎么越来越大"。
+        顺带把残留的 `.part` 也扫掉（取消、或者进程被杀在写盘中途会留下）。
+
+        `keep` 一定要排掉：那是刚下好的成品，正要交给安装器。
+        """
+        try:
+            names = os.listdir(self.update_dir)
+        except OSError:
+            return
+        for n in names:
+            p = os.path.join(self.update_dir, n)
+            if p == keep:
+                continue
+            if n.endswith('.apk') or n.endswith('.part'):
+                _silent_remove(p)
+
+    def _dl_set(self, **kw):
+        """写下载进度（只改这几个字段，别整体替换 —— 会把 path/name 丢掉）。"""
+        with self.lock:
+            self.dl.update(kw)
 
 
 # ============================================================================
@@ -1246,6 +1531,17 @@ def make_handler(engine: Engine):
             if path == '/api/history/delete':
                 return self._json({'ok': engine.delete_history(data.get('id') or 0)})
 
+            if path == '/api/update/download':
+                # 开始下载安装包。`installed_at` 还是要带上：万一还没检查过，
+                # 这一下会顺带把检查做掉（用户点「更新」不该再被要求先点「检查」）。
+                return self._json(engine.start_download(
+                    installed_at=as_int(data.get('at'), 0),
+                    force=bool(data.get('force')),
+                ))
+
+            if path == '/api/update/cancel':
+                return self._json(engine.cancel_download())
+
             return self._json({'error': 'not found'}, 404)
 
     return Handler
@@ -1279,20 +1575,24 @@ def engine() -> Engine:
 
 
 def start(ctx=None, version: str = '', root: str = None, get=None,
-          publish=None, host: str = '127.0.0.1', port: int = 0) -> int:
+          publish=None, host: str = '127.0.0.1', port: int = 0,
+          files_dir: str = None, apk_opener=None) -> int:
     """起本地服务，返回端口号（Java 用它拼出要加载的网址）。
 
     只绑 `127.0.0.1`：同一 Wi-Fi 下的别的设备也连不上；而且清单里
     只需要为这一条回环地址放行明文 HTTP。
 
     `ctx` 是安卓的 Application 上下文（电脑上传 None）。
+    `files_dir` 是安卓的应用私有目录（Java 传，见 MainActivity 里的 Kwarg）：
+    应用内更新的安装包必须下在那底下 —— FileProvider 只开放了那一个子目录。
+    `apk_opener` 是给测试留的注入口（假安装包下载），不注入就走真实网络。
     """
     global _ENGINE, _SERVER, _THREAD
     if _SERVER is not None:
         return _SERVER.server_address[1]
 
     _ENGINE = Engine(root=root, get=get, publish=publish or _java_publish(ctx),
-                     version=version)
+                     version=version, files_dir=files_dir, apk_opener=apk_opener)
     _ENGINE.log_line(f'{APP_LABEL} {version}'.strip())
     _SERVER = _Server((host, port), make_handler(_ENGINE))
     _THREAD = threading.Thread(target=_SERVER.serve_forever, daemon=True)

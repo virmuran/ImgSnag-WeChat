@@ -135,6 +135,10 @@ input::placeholder{color:var(--sub)}
 .setrow .btn{flex:0 0 auto; min-height:0; padding:9px 14px; font-size:14px}
 /* 真查出有新版本时才把标题点亮 —— 平时它就是个安静的入口 */
 #updTitle.on{color:var(--accent)}
+/* 更新卡片里的"去网页下载"兜底链接（应用内下载走不通时出现）。
+   做成一行小字而不是第二个按钮：设置行右侧只放得下一个按钮。 */
+.link{display:inline-block; margin-top:3px; font-size:12.5px;
+  color:var(--accent); text-decoration:underline}
 
 /* ── 状态条 ── */
 #status{display:none; margin:0 0 10px; padding:11px 13px; border-radius:12px;
@@ -298,6 +302,9 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
         <label>
           <span class="sett" id="updTitle">版本更新</span>
           <span class="setd" id="updDesc">看看 GitHub 上有没有更新的安装包</span>
+          <!-- 兜底入口：应用内下载失败（手机网络连不上 GitHub 的下载地址）时
+               还有这条路可走。默认藏着，需要时才出现。 -->
+          <span class="link" id="updWeb" hidden>去网页下载</span>
         </label>
         <button class="btn" id="updBtn">检查</button>
       </div>
@@ -459,9 +466,9 @@ $('#url').onkeydown = function(e){
 };
 
 /* ── 与 Java 的桥 ──
-   五个方法（read / copy / depth / open / installedAt）一律写成"桥不在就当没有"：
-   在电脑浏览器里直接开这个页面调试时 window.imgsnag 不存在，
-   这里若抛异常，后面的脚本整段都不会执行 —— 表现是"页面半死"，最难查。 */
+   七个方法（read / copy / depth / open / installedAt / canInstall / install）
+   一律写成"桥不在就当没有"：在电脑浏览器里直接开这个页面调试时 window.imgsnag
+   不存在，这里若抛异常，后面的脚本整段都不会执行 —— 表现是"页面半死"，最难查。 */
 
 /* 把"现在在第几层"同步给 Java。它的返回回调照这个数决定：
    还有层就退网页，退到底了才退出 App。 */
@@ -483,7 +490,8 @@ function openExternal(url){
 }
 
 /* 本机这个 App 是什么时候装的（毫秒时间戳）。0 = 问不到。
-   更新检查靠它跟远端安装包的构建时间比大小。 */
+   更新检查拿它做**兜底**判据（主判据是版本号）：两边版本号相同但重新构建过时，
+   "构建时间比安装时间新"就是唯一能发现更新的线索。 */
 function installedAt(){
   try{
     if (window.imgsnag && window.imgsnag.installedAt){
@@ -493,6 +501,34 @@ function installedAt(){
     }
   }catch(e){ /* 没桥 */ }
   return 0;
+}
+
+/* ── 应用内更新：装更新包 ──
+   下载在本机服务里做（能进度、能校验），**最后一步必须靠 Java** ——
+   把 APK 交给系统安装器是安卓平台的活，网页做不到。
+   桥不在（电脑浏览器里调试）时返回空串，界面据此只给"去网页下载"。 */
+
+/* 现在能不能直接装包（用户给过「允许安装未知应用」没有）。
+   '' = 问不到（没桥），'1' = 可以，'0' = 还得先去系统里授权。 */
+function canInstallNative(){
+  try{
+    if (window.imgsnag && window.imgsnag.canInstall){
+      return String(window.imgsnag.canInstall());
+    }
+  }catch(e){ /* 没桥 */ }
+  return '';
+}
+
+/* 把下载好的安装包交给系统安装器。返回 Java 侧的原话：
+   ok / settings（已把用户送去授权页）/ bad / fail。 */
+function installApk(path){
+  if (!path) return 'bad';
+  try{
+    if (window.imgsnag && window.imgsnag.install){
+      return String(window.imgsnag.install(path));
+    }
+  }catch(e){ /* 桥坏了按失败处理 */ }
+  return '';
 }
 
 /* 把一段文字写进系统剪贴板（「复制」用）。返回 true = 确实写进去了。
@@ -934,6 +970,17 @@ function applyState(s){
   var foot = (s.label || '') + ' ' + (s.version ? 'v' + s.version : '')
     + '  ·  支持：' + (s.sites || '') + '  ·  相册：Pictures/' + (s.album || '');
   $('#foot').textContent = foot.trim();
+
+  // 应用内更新的进度跟着这条轮询回来。下载中每轮都重画（进度要动），
+  // 其余只在状态切换时画一次 —— 否则每 1.2 秒把按钮文案擦一遍，
+  // 用户正在点的时候按钮会闪。
+  if (s.dl){
+    updDl = s.dl;
+    if (s.dl.phase !== lastDlPhase || s.dl.phase === 'downloading'){
+      lastDlPhase = s.dl.phase;
+      paintUpdate();
+    }
+  }
 }
 
 function refresh(){
@@ -942,16 +989,80 @@ function refresh(){
 
 /* ── 版本更新 ── */
 /* 判定全在后端（它有网络、也能读盘做节流），这里只把结论说成人话。
-   四态：查不到 / 有新版本 / 查到了但不知道本机装的是哪个 / 已是最新。 */
+   信息态四种：查不到 / 有新版本 / 查到了但不知道本机装的是哪个 / 已是最新。
+   动作态三种（应用内更新）：下载中 / 已下载可安装 / 下载失败。
+   动作态优先 —— 用户已经在动手了，别让信息态把它盖掉。 */
 var updUrl = '';
+var updAction = 'check';
+/* 最近一次下载状态（跟着轮询更新，见 applyState）。单独放一个变量：
+   `update` 每次检查都被整个替换掉，挂在它上面会被抹掉。 */
+var updDl = {};
+var lastDlPhase = '';
+var updChecking = false;
+
+function fmtBytes(n){
+  n = Number(n) || 0;
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+
 function paintUpdate(){
-  var title = $('#updTitle'), desc = $('#updDesc'), btn = $('#updBtn');
-  updUrl = '';
+  if (updChecking) return;        // 正在检查：别把"检查中"的临时状态擦掉
+  var title = $('#updTitle'), desc = $('#updDesc'), btn = $('#updBtn'), web = $('#updWeb');
+  updUrl = update.page_url || '';
+  updAction = 'check';
   title.className = '';
   btn.disabled = false;
+  web.hidden = true;
+
+  var dl = updDl || {};
+
+  /* ① 下载中 */
+  if (dl.phase === 'downloading'){
+    var pct = dl.total ? Math.round(dl.done * 100 / dl.total) : 0;
+    title.textContent = '正在下载更新';
+    title.className = 'on';
+    desc.textContent = fmtBytes(dl.done)
+      + (dl.total ? ' / ' + fmtBytes(dl.total) + '（' + pct + '%）' : '');
+    btn.textContent = '取消';
+    updAction = 'cancel';
+    return;
+  }
+
+  /* ② 已下载：可以装了 */
+  if (dl.phase === 'done'){
+    if (!canInstallNative()){
+      // 桥不在（电脑浏览器里调试）：装不了，只能去网页
+      title.textContent = '更新已下载';
+      desc.textContent = '要在 App 里才能装，这里只能去网页下载';
+      btn.disabled = true;
+      web.hidden = false;
+      return;
+    }
+    title.textContent = '更新已下载';
+    title.className = 'on';
+    desc.textContent = 'v' + (update.remote_version || dl.version || '')
+      + ' 已就绪，点「安装」交给系统（首次会先要一次安装权限）';
+    btn.textContent = '安装';
+    updAction = 'install';
+    return;
+  }
+
+  /* ③ 下载失败：这条路走不通了，**必须**把网页那条路摆出来 */
+  if (dl.phase === 'error'){
+    title.textContent = '下载失败';
+    desc.textContent = dl.error || '没能下载下来';
+    btn.textContent = '重试';
+    updAction = 'update';
+    web.hidden = false;
+    return;
+  }
+
+  /* ④ 还没开始下载：原来的信息态 */
   if (!update || update.current === undefined){
     title.textContent = '版本更新';
-    desc.textContent = update && update.error ? update.error : '还没检查过';
+    desc.textContent = (update && update.error) ? update.error : '还没检查过';
     btn.textContent = '检查';
     return;
   }
@@ -962,22 +1073,28 @@ function paintUpdate(){
     return;
   }
   if (update.has_update){
+    var hasBridge = (canInstallNative() !== '');
     title.textContent = '有新版本';
     title.className = 'on';
     desc.textContent = 'v' + (update.remote_version || '?')
-      + '（' + (update.remote_time || '') + '构建），点右边去下载';
-    btn.textContent = '去下载';
-    updUrl = update.page_url || '';
+      + (hasBridge ? '，可在这儿直接下好并安装' : '（' + (update.remote_time || '') + '构建）');
+    if (hasBridge){
+      btn.textContent = '更新';      // 应用内：下载 → 安装，一条龙
+      updAction = 'update';
+    } else {
+      btn.textContent = '去下载';    // 电脑浏览器里只能跳网页
+      updAction = 'web';
+    }
     return;
   }
   if (update.unknown){
-    // 拿不到本机安装时间（在电脑浏览器里调试时就是这样）：
+    // 拿不到本机安装信息（在电脑浏览器里调试时就是这样）：
     // 只说远端有什么，**不下"有没有新版"的结论** —— 猜一个比不给更糟
     title.textContent = '版本更新';
     desc.textContent = 'GitHub 上最新：v' + (update.remote_version || '?')
       + '（' + (update.remote_time || '') + '）';
     btn.textContent = '去看看';
-    updUrl = update.page_url || '';
+    updAction = 'web';
     return;
   }
   title.textContent = '已是最新';
@@ -988,6 +1105,7 @@ function paintUpdate(){
 
 function checkUpdate(force){
   var btn = $('#updBtn');
+  updChecking = true;
   btn.disabled = true;
   if (force) $('#updDesc').textContent = '正在检查…';
   // ⚠ 判"接口通了没有"不能用 `r.error`：正常响应里也有个 error 字段
@@ -996,6 +1114,7 @@ function checkUpdate(force){
   var q = '/api/update?at=' + installedAt() + (force ? '&force=1' : '');
   return api(q).then(function(r){
     update = (r && r.current !== undefined) ? r : {error: '连不上本机服务'};
+    updChecking = false;
     paintUpdate();
     if (force){
       toast(update.ok
@@ -1004,9 +1123,53 @@ function checkUpdate(force){
     }
   });
 }
+
+/* 应用内更新：开始下载。后端下、这里只看进度（进度跟着轮询回来）。 */
+function startDownload(){
+  var btn = $('#updBtn');
+  btn.disabled = true;
+  $('#updDesc').textContent = '正在准备下载…';
+  return api('/api/update/download', {at: installedAt()}).then(function(r){
+    updDl = (r && r.phase) ? r : {phase: 'error', error: (r && r.error) || '起不来下载'};
+    lastDlPhase = updDl.phase;
+    paintUpdate();
+    if (updDl.phase === 'error') toast(updDl.error || '下载失败');
+  });
+}
+
+/* 把下载好的包装进系统。Java 说"settings"＝它已把用户送去授权页，
+   授权回来会自动接着装（见 MainActivity.onResume）。 */
+function doInstall(){
+  var path = (updDl && updDl.path) || '';
+  var r = installApk(path);
+  if (r === 'ok') return;
+  if (r === 'settings'){
+    toast('请在系统里允许「安装未知应用」，回来会自动继续');
+    return;
+  }
+  // 桥不在、或路径被拒：别让用户对着"点了没反应"发呆
+  toast(r === 'bad' ? '安装包不见了，请重新下载' : '没能拉起安装器，可以试试去网页下载');
+  $('#updWeb').hidden = false;
+}
+
 $('#updBtn').onclick = function(){
-  if (updUrl) return void openExternal(updUrl);
+  if (updAction === 'cancel'){
+    api('/api/update/cancel', {}).then(function(r){
+      if (r && r.phase) updDl = r;
+      paintUpdate();
+      toast('已取消下载');
+    });
+    return;
+  }
+  if (updAction === 'install') return void doInstall();
+  if (updAction === 'update') return void startDownload();
+  if (updAction === 'web') return void openExternal(updUrl);
   checkUpdate(true);
+};
+
+/* 兜底入口：应用内下载走不通时去 Release 页自己下 */
+$('#updWeb').onclick = function(){
+  if (!openExternal(updUrl || (update && update.page_url))) toast('这个要在 App 里用');
 };
 
 /* ── 轮询：兼顾"分享进来的内容" ── */

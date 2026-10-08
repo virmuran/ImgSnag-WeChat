@@ -13,7 +13,7 @@
     <img alt="deps" src="https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-requests%20%2B%20PySide6-Essentials-blue">
 </div>
 <div>
-    <img alt="version" src="https://img.shields.io/badge/version-1.11.0-green">
+    <img alt="version" src="https://img.shields.io/badge/version-1.11.1-green">
     <img alt="stars" src="https://img.shields.io/github/stars/virmuran/ImgSnag-WeChat?style=social">
 </div>
 <br>
@@ -383,6 +383,21 @@ ImgSnag-WeChat/
 
 > 本段与 GitHub Release 正文使用**完全相同**的内容 —— 写一次，两处直接粘贴，不会出现两种说法。
 > 格式规范见 [`RELEASE_NOTES_TEMPLATE.md`](RELEASE_NOTES_TEMPLATE.md)；发版前跑 `python tools/check_release_notes.py` 校验两处逐字一致。
+
+### v1.11.1 (2026-10-08)
+
+安卓版可以直接在 App 里下载并安装新版本，不用再去网页翻找。
+
+**新增**
+- 安卓版查到有新版本后，点「更新」就在 App 里下载，下完点「安装」交给系统完成升级
+
+**改进**
+- 安卓版判断有没有新版本改为以版本号为准，部分机型读不到安装时间时也能给出结论
+
+**兼容性提示**
+- 安卓版多了一条「安装应用」权限，只用于应用内更新，App 不会在后台自行安装任何东西
+- 安卓版首次点「安装」时，系统会要求先允许 ImgSnag「安装未知应用」；App 会直接跳到那个设置页，开好退回来会自动接着装
+- 桌面版这一版没有界面变化，仅版本号与安卓版同步
 
 ### v1.11.0 (2026-10-07)
 

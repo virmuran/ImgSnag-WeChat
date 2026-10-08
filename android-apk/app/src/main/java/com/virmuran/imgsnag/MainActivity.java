@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
@@ -25,6 +26,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.FileProvider;
+
+import com.chaquo.python.Kwarg;
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -43,8 +47,9 @@ import java.util.Locale;
  *   2. 用一个 WebView 加载 {@code http://127.0.0.1:<端口>/} ——
  *      网格、大图预览、历史页都在那个网页里；
  *   3. 把「微信分享过来的文本」转交给界面（{@code imgsnag_web.push_share}）；
- *   4. 把返回键（含侧边滑动返回）交给网页的层级去处理 —— 见 {@link #setupBack()}。
- *      另有一个只读的桥（剪贴板 / 层级上报 / 开外链 / 本机安装时间）。
+     *   4. 把返回键（含侧边滑动返回）交给网页的层级去处理 —— 见 {@link #setupBack()}。
+     *      另有一个只读的桥（剪贴板 / 层级上报 / 开外链 / 本机安装时间 /
+     *      应用内更新：下载好的 APK 交给系统安装器）。
  *
  * ── 为什么这套东西跑在本机的一个端口上 ──
  * 页面与接口**同源**：不需要处理跨域，也不需要写 JS↔Java 的桥。
@@ -68,6 +73,16 @@ public class MainActivity extends Activity {
 
     /** 本地服务的地址头。端口由 Python 侧随机分配（避免撞上别的 App 占用的端口）。 */
     private static final String LOOPBACK = "http://127.0.0.1:";
+
+    /**
+     * 应用内更新的安装包放在 files 目录下的这个子目录里。
+     * 必须与 res/xml/file_paths.xml 里给 FileProvider 开的那条路**一致** ——
+     * 两边不一致的表现是"下载完成、点安装却报文件不存在"（测试钉住这条）。
+     */
+    private static final String UPDATE_DIR = "update";
+
+    /** FileProvider 的 authority，与清单里那条 provider 声明中的一致。 */
+    private static final String FILE_PROVIDER_AUTHORITY = BuildConfig.APPLICATION_ID + ".fileprovider";
 
     /** 等网页起来的上限。超过就认定失败并把兜底按钮亮出来。 */
     private static final int BOOT_TIMEOUT_MS = 15000;
@@ -115,6 +130,15 @@ public class MainActivity extends Activity {
      * 这个数由网页自己数、每次 push/pop 都同步一次，语义明确且本机可测。
      */
     private volatile int webDepth = 0;
+
+    /**
+     * 用户点了「安装」但还没给「允许安装未知应用」授权时，先把包路径攒在这儿；
+     * 从系统设置页回来后（{@link #onResume()}）若已授权，接着把这次安装做完。
+     *
+     * 不攒的话表现是"点了安装跳到设置页，授权回来什么都没发生" ——
+     * 用户以为坏了，其实只差再点一次。
+     */
+    private volatile String pendingInstallPath = null;
 
     /** 网页迟迟不来时的看门狗。 */
     private final Runnable watchdog = new Runnable() {
@@ -282,13 +306,16 @@ public class MainActivity extends Activity {
     // ──────────────────────────── 剪贴板桥 ────────────────────────────
 
     /**
-     * 给网页用的**只读**桥（外加一个"打开链接"的动作）。
+     * 给网页用的桥（读剪贴板 / 上报层级 / 开链接 / 本机安装时间 / 装应用内更新包）。
      *
-     * 四个方法各管一件事，都不碰文件、不执行命令：
+     * 各方法只管一件事，都不执行任意命令、不读任意路径：
      *   · read()       —— 剪贴板里的纯文本与 HTML（「从剪贴板」按钮）
+     *   · copy(text)   —— 把文字放进剪贴板（「复制」按钮）
      *   · depth(n)     —— 网页现在在第几层（返回手势的唯一判据）
-     *   · open(url)    —— 用系统浏览器打开 https（更新说明 / 下载页）
+     *   · open(url)    —— 用系统浏览器打开 https（更新说明 / 下载页兜底）
      *   · installedAt()—— 本机安装时间（更新检查要跟远端比）
+     *   · canInstall() —— 现在能不能直接装包（有没有「安装未知应用」授权）
+     *   · install(path)—— 把下载好的 APK 交给系统安装器（**只认自己下载目录**）
      *
      * 网页是从 127.0.0.1 加载的自家页面，而且外链一律交给系统浏览器打开
      * （见 shouldOverrideUrlLoading），所以这个桥不会被别的页面碰到。
@@ -379,10 +406,9 @@ public class MainActivity extends Activity {
         /**
          * 本机这个 App 是什么时候装的（毫秒时间戳）。0 = 问不到。
          *
-         * 更新检查靠它跟 GitHub 上那个安装包的构建时间比大小 —— 比版本号靠谱：
-         * 滚动发布位的 tag 里没有版本号，而且"同版本号重新构建"时版本号压根不变，
-         * 那恰恰是最常见的情况。返回 String 而不是 long：跨语言传数值的精度
-         * 问题没必要去踩，反正马上就变成数字了。
+         * 更新检查**主要比版本号**（远端资产名里有），这个时间是**兜底**：
+         * 万一哪天资产名里的版本号认不出来，还能靠"构建时间比安装时间新"下结论。
+         * 返回 String 而不是 long：跨语言传数值的精度问题没必要去踩。
          */
         @JavascriptInterface
         @SuppressWarnings("deprecation")
@@ -392,6 +418,118 @@ public class MainActivity extends Activity {
                 return String.valueOf(pi.lastUpdateTime);
             } catch (Exception e) {
                 return "0";
+            }
+        }
+
+        /**
+         * 现在能不能直接装包 —— 即用户有没有给过「允许安装未知应用」。
+         *
+         * 网页拿它决定按钮文案：没授权就写「授权并安装」，授权了就直接「安装」。
+         * 别指望"点了再说"：跳到设置页会打断用户，提前说清比事后解释便宜。
+         */
+        @JavascriptInterface
+        public String canInstall() {
+            return canRequestInstall() ? "1" : "0";
+        }
+
+        /**
+         * 把下载好的安装包交给系统安装器（应用内更新的最后一步）。
+         *
+         * **只认 `files/update/` 下的文件**：这个方法的入参来自网页，
+         * 而网页里显示的内容来自抓来的文章 —— 白名单一条比事后追查便宜得多。
+         *
+         * 返回：
+         *   "ok"       安装器已经弹出来了
+         *   "settings" 还没给安装权限，已把用户送去设置页（授权回来后自动接着装）
+         *   "bad"      路径不在自己的下载目录里 / 文件不存在
+         *   "fail"     别的原因没起来（没装安装器、ROM 限制等）
+         */
+        @JavascriptInterface
+        public String install(String path) {
+            if (path == null || path.isEmpty()) {
+                return "bad";
+            }
+            File apk = new File(path);
+            if (!inUpdateDir(apk) || !apk.isFile()) {
+                return "bad";
+            }
+            if (!canRequestInstall()) {
+                pendingInstallPath = apk.getAbsolutePath();
+                return askForInstallPermission() ? "settings" : "fail";
+            }
+            return startInstaller(apk) ? "ok" : "fail";
+        }
+    }
+
+    /** 这个文件是不是在自己那个下载目录里（软链接、`..` 都绕不过去）。 */
+    private boolean inUpdateDir(File f) {
+        try {
+            String root = new File(getFilesDir(), UPDATE_DIR).getCanonicalPath();
+            String p = f.getCanonicalPath();
+            return p.startsWith(root + File.separator);
+        } catch (Exception e) {
+            return false;       // 路径都算不出来，就当它不在
+        }
+    }
+
+    /**
+     * 用户给过「允许安装未知应用」没有。
+     *
+     * minSdk 29，`canRequestPackageInstalls()`（API 26 起）一定在，不必判版本号。
+     * 问不到就按"没授权"处理 —— 会先把用户送去设置页，比直接失败强。
+     */
+    private boolean canRequestInstall() {
+        try {
+            return getPackageManager().canRequestPackageInstalls();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 把用户送到「安装未知应用」的授权页（每个 App 一次，之后不再问）。 */
+    private boolean askForInstallPermission() {
+        try {
+            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())));
+            return true;
+        } catch (Exception e) {
+            log("⚠ 打不开「安装未知应用」设置页：" + e);
+            return false;
+        }
+    }
+
+    /**
+     * 拉起系统安装器。
+     *
+     * 安卓 7 起 `file://` 不能跨应用传（FileUriExposedException），必须用
+     * FileProvider 的 `content://` 并**显式授予读权限** —— 少那个 flag 的表现是
+     * 安装器弹出又立刻报"解析包时出现问题"，而原因跟安装包本身毫无关系。
+     */
+    private boolean startInstaller(File apk) {
+        try {
+            Uri uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, apk);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return true;
+        } catch (Exception e) {
+            log("❌ 拉起安装器失败：" + e);
+            return false;
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 从「安装未知应用」设置页回来：这回给了权限就把攒着的那次安装接着做完。
+        // 没给也就算了 —— 用户会再点一次安装按钮，不必反复弹设置页骚扰他。
+        String pending = pendingInstallPath;
+        if (pending != null && canRequestInstall()) {
+            pendingInstallPath = null;
+            File apk = new File(pending);
+            if (apk.isFile() && inUpdateDir(apk)) {
+                startInstaller(apk);
             }
         }
     }
@@ -413,7 +551,11 @@ public class MainActivity extends Activity {
                 try {
                     // ctx 传 Application 上下文 —— Python 侧要拿它调 Gallery 写相册。
                     Context app = getApplicationContext();
-                    PyObject out = webMod.callAttr("start", app, BuildConfig.VERSION_NAME);
+                    // files_dir 显式传过去（不靠 Python 猜 HOME 在哪）：应用内更新下载的
+                    // APK 必须落在 FileProvider 声明过的那个目录里，猜错的表现是
+                    // "下载完成、点安装却报文件不存在"，而且只在真机上才暴露。
+                    PyObject out = webMod.callAttr("start", app, BuildConfig.VERSION_NAME,
+                            new Kwarg("files_dir", app.getFilesDir().getAbsolutePath()));
                     got = out == null ? 0 : out.toInt();
                 } catch (Throwable t) {
                     // 必须兜 Throwable：Python 侧的语法/导入错误由 Chaquopy 以

@@ -11,7 +11,8 @@
 
 纪律（上一轮踩坑后固化，别省）：
   · **改之前先写 <文件>.rvbak**，脚本启动时先扫残留自动恢复 ——
-    整套跑完要一分多钟，可能被中途掐断，而 SIGTERM 下 finally 不执行。
+    整套跑完要**好几分钟**（69 条用例，每条都要起一次子进程跑测试），
+    可能被中途掐断，而 SIGTERM 下 finally 不执行。
     没有 .rvbak 的话源码会留在"拆坏"状态，而且看起来很正常。
   · 子进程必须显式 timeout，超时算「测试没过」而不是卡死。
   · 输出同时落盘 + flush（管道会缓冲，被掐断时看不到任何中间输出）。
@@ -34,6 +35,7 @@ STRINGS = 'android-apk/app/src/main/res/values/strings.xml'
 BRIDGE = 'android-apk/app/src/main/python/imgsnag_android.py'
 MAIN_JAVA = 'android-apk/app/src/main/java/com/virmuran/imgsnag/MainActivity.java'
 GAL_JAVA = 'android-apk/app/src/main/java/com/virmuran/imgsnag/Gallery.java'
+NSC_XML = 'android-apk/app/src/main/res/xml/network_security_config.xml'
 APP_GRADLE = 'android-apk/app/build.gradle.kts'
 APK_README = 'android-apk/README.md'
 SYNCED = 'android-apk/app/src/main/python/web_image_dl/naming.py'
@@ -115,9 +117,13 @@ CASES = [
     ('Java 投递分享时改了方法名', MAIN_JAVA,
      'webMod.callAttr("push_share", share)', 'webMod.callAttr("push_sharex", share)',
      '[10] Java 调的确实是 push_share', TEST_WEB),
+    # ⚠ 这条锚点跟过版：`start` 的调用从"一行写完"改成了多行 + `Kwarg`（传 files_dir），
+    #   旧锚点 `callAttr("start", app, BuildConfig.VERSION_NAME)` 就找不到了 ——
+    #   而"锚点找不到"在脚本里是被当成**失败**报出来的（不是静默跳过），这正是要的行为。
+    #   留意 `,` 一起带上：拆坏后 group(1) 只剩 `app,`，`VERSION_NAME` 不在里面。
     ('Java 忘了把版本号传给 Python', MAIN_JAVA,
-     'webMod.callAttr("start", app, BuildConfig.VERSION_NAME)',
-     'webMod.callAttr("start", app)',
+     'webMod.callAttr("start", app, BuildConfig.VERSION_NAME,',
+     'webMod.callAttr("start", app,',
      '[10] Java 把版本号一起传了进去', TEST_WEB),
     ('Python 侧换了相册目录名', WEB_PY,
      'ALBUM_SUBDIR = imgsnag.DEFAULT_SUBDIR', "ALBUM_SUBDIR = 'Snagged'",
@@ -217,17 +223,89 @@ CASES = [
      'UPDATE_SLACK_MS = 60 * 1000', 'UPDATE_SLACK_MS = 0',
      '[13] 只差几十秒不算更新', TEST_WEB),
     ('挑资产时不看后缀（拿一个文本文件的时间去比）', WEB_PY,
-     "        apk = next((a for a in info.assets if a.name.lower().endswith('.apk')), None)",
-     "        apk = next((a for a in info.assets), None)",
-     '[13] 取的是 .apk 那个资产的时间', TEST_WEB),
+     "        apks = [a for a in (assets or []) if str(a.name).lower().endswith('.apk')]",
+     "        apks = [a for a in (assets or [])]",
+     '[13] 把要下载的资产名一起带回来', TEST_WEB),
     ('安装时间不合理的值不设防（截断成负数 → 永远说有新版）', WEB_PY,
      '        if installed_at < MIN_INSTALL_MS:\n            installed_at = 0',
      '        pass',
      '[13] 安装时间被截断成负数时不能报有更新', TEST_WEB),
     ('问不到安装时间时硬说"没有新版"', WEB_PY,
-     "            'unknown': bool(remote_ms and not installed_at),",
+     "            'unknown': bool(apk and not installed_at and not by_version),",
      "            'unknown': False,",
-     '[13] 问不到安装时间时如实说', TEST_WEB),
+     '[13] 两个判据都拿不到时如实说', TEST_WEB),
+    # 这一条是"改成比版本号"之后的核心：退回只看时间的话，用户自己装了更新的包
+    # 也照样被提示升级（表现无害，只是烦人），而远端包构建时间更早时又会漏报。
+    ('版本号不再参与判断（退回只看构建时间）', WEB_PY,
+     '        if by_version and cmp_version != 0:', '        if False:',
+     '[13] 远端版本更高 → 有更新', TEST_WEB),
+    ('版本号相同时不再回退看时间（同版本号重建就漏了）', WEB_PY,
+     '            has_update = by_time\n', '            has_update = False\n',
+     '[13] 版本号相同但远端构建更晚', TEST_WEB),
+
+    # ── 应用内更新（沐然提的"别让人去网页下载"）───────────────────────
+    # 这一组的共同点：**错了只在真机上暴露** —— 本地编译不了、没有安卓设备，
+    # 测试是唯一的防线，所以更要确认这些断言真的拦得住。
+    ('Java 不再把应用私有目录传给 Python（下载落到别处）', MAIN_JAVA,
+     'new Kwarg("files_dir", app.getFilesDir().getAbsolutePath())',
+     'new Kwarg("files_dir", "")',
+     '[14] 落在 files_dir 下', TEST_WEB),
+    ('FileProvider 开放的目录名与约定不一致', 'android-apk/app/src/main/res/xml/file_paths.xml',
+     'path="update/"', 'path="updated/"',
+     '[10] FileProvider 只开放 update/', TEST_WEB),
+    ('FileProvider 把整个 files 目录都放出去（历史库一起暴露）',
+     'android-apk/app/src/main/res/xml/file_paths.xml',
+     '<files-path name="update" path="update/"/>', '<files-path name="update" path="."/>',
+     '[10] FileProvider 只开放 update/', TEST_WEB),
+    # ⚠ 这四条是**同一类**假断言：清单/资源 XML 顶上都有一大块说明注释，
+    #   把检查要找的字符串原样复述了一遍。所以拆坏必须**只删真代码、留下注释** ——
+    #   要是连注释一起删，"断言被注释喂饱"这件事就验不出来（这就是第 2 条
+    #   假断言的成因，工具自己抓出来的）。
+    #   配套修法见 tests/test_apk_web.py 的 `strip_xml_comments()`。
+    ('装包权限被删（安卓 8 起装不了任何包）', MANIFEST,
+     '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>\n',
+     '',
+     '[10] 清单里声明了装包权限', TEST_WEB),
+    ('明文放行被拿掉（清单顶上注释里也有这个词）', NSC_XML,
+     '    <domain-config cleartextTrafficPermitted="true">', '    <domain-config>',
+     '[10] 明确放行明文', TEST_WEB),
+    ('放行的域名写错（注释里也有 127.0.0.1）', NSC_XML,
+     '        <domain includeSubdomains="false">127.0.0.1</domain>',
+     '        <domain includeSubdomains="false">localhost</domain>',
+     '[10] 放行的是回环地址', TEST_WEB),
+    ('FileProvider 不再允许把 uri 临时授权出去（安装器读不到包）', MANIFEST,
+     '            android:grantUriPermissions="true">',
+     '            android:grantUriPermissions="false">',
+     '[10] 允许把这个 uri 临时授权给安装器', TEST_WEB),
+    ('装包时不校验"是不是自己下载的文件"', MAIN_JAVA,
+     'if (!inUpdateDir(apk) || !apk.isFile())', 'if (!apk.isFile())',
+     '[10] 安装前真的拿这个判断拦了一道', TEST_WEB),
+    ('桥上的 install 忘了标注解（JS 调不到，且不报错）', MAIN_JAVA,
+     '        @JavascriptInterface\n        public String install(String path) {',
+     '        public String install(String path) {',
+     '[10] install() 标了 @JavascriptInterface', TEST_WEB),
+    ('下载完不校验字节数（截断的包也当成功）', WEB_PY,
+     '            if size and got != size:', '            if False and size:',
+     '[14] 被截断', TEST_WEB),
+    ('下载完不校验 sha256（传输途中被改也照装）', WEB_PY,
+     '            if want and digest.hexdigest() != want:', '            if False and want:',
+     '[14] 摘要对不上', TEST_WEB),
+    ('下载完不删上一版安装包（应用目录里 20MB 一个地攒）', WEB_PY,
+     '            self._prune_old_apks(dest)', '            pass',
+     '[14] 下载目录里只剩这一次下好的那个', TEST_WEB),
+    ('下载失败后不删半截文件（.part 留在下载目录）', WEB_PY,
+     '        except Exception as e:                          # noqa: BLE001\n'
+     '            _silent_remove(tmp)',
+     '        except Exception as e:                          # noqa: BLE001\n            pass',
+     '[14] 下载目录里什么都不剩', TEST_WEB),
+    ('取消后不删半截文件（手机上下到一半反悔是常事）', WEB_PY,
+     '        except _Cancelled:\n            _silent_remove(tmp)',
+     '        except _Cancelled:\n            pass',
+     '[14] 取消后不留半截文件', TEST_WEB),
+    ('下载目录不用传进来的那个（只看数据目录）', WEB_PY,
+     '        self.update_dir = os.path.join(files_dir or self.root, UPDATE_DIR_NAME)',
+     '        self.update_dir = os.path.join(self.root, UPDATE_DIR_NAME)',
+     '[14] 落在 files_dir 下', TEST_WEB),
 
     # ── 「复制标题」（沐然新提的小功能）───────────────────────────────
     # 这一组错了都不报错：按钮点了没反应、或者复制出来是空的 ——
