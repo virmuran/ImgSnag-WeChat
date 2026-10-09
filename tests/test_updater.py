@@ -463,6 +463,189 @@ def test_cert_error_message():
     check('证书' in info.error, 'error 文案与 _describe_error 一致')
 
 
+# ================================================================
+#  应用内更新：下载 / 校验 / 解压（web_image_dl.update_dl）
+# ================================================================
+
+def _fake_opener(payload: bytes, *, fail: Exception | None = None, chunk: int = 8):
+    """假造一个 requests 风格的响应（下载只用它的 iter_content）。"""
+
+    class _Resp:
+        def iter_content(self, size):
+            for i in range(0, len(payload), chunk):
+                yield payload[i:i + chunk]
+
+    def _open(url, timeout):
+        if fail is not None:
+            raise fail
+        return _Resp()
+    return _open
+
+
+def test_update_download():
+    """桌面版应用内更新：形态判断 / 挑资产 / 下载校验 / 解压。
+
+    这些都是「错了不会报错」的环节：下到一个用不上的形态、把截断的包当成品收下、
+    解压时被压缩包写到目录外面 —— 每一条的现场都不在出错的地方。所以全在这里钉死，
+    本用例**不联网**（网络靠注入的 opener 假造）。
+    """
+    import hashlib
+    import zipfile as _zip
+
+    from web_image_dl import update_dl as D
+
+    print('\n[UP-10] 应用内更新：形态判断 / 挑资产 / 下载校验 / 解压')
+
+    payload = b'hello-imgsnag' * 100
+    good = hashlib.sha256(payload).hexdigest()
+    tmp = tempfile.mkdtemp(prefix='imgsnag_dl_')
+
+    # ---- 形态判断：看 exe 自己所在的目录，不看进程的当前目录 ----
+    d1 = tempfile.mkdtemp(prefix='imgsnag_mode_')
+    exe1 = os.path.join(d1, 'ImgSnagWeChat.exe')
+    open(exe1, 'wb').write(b'MZ')
+    eq(D.detect_install_mode(exe1), D.MODE_PORTABLE, '只有主程序 → 便携版')
+    open(os.path.join(d1, D.UNINSTALLER_NAME), 'wb').write(b'MZ')
+    eq(D.detect_install_mode(exe1), D.MODE_INSTALLER,
+       f'同目录有 {D.UNINSTALLER_NAME} → 安装版')
+    sub = os.path.join(d1, 'sub')
+    os.makedirs(sub, exist_ok=True)
+    eq(D.detect_install_mode(os.path.join(sub, 'ImgSnagWeChat.exe')), D.MODE_PORTABLE,
+       '判据是 exe 自己所在目录（用 cwd 判断会得出相反结论）')
+
+    # ---- 挑资产 ----
+    info = U.UpdateInfo(ok=True, assets=[
+        U.AssetInfo('ImgSnagWeChat_1.11.0_setup.exe', 'installer', 10, 'u1'),
+        U.AssetInfo('ImgSnagWeChat_1.11.0_portable.zip', 'portable', 10, 'u2'),
+    ])
+    eq(getattr(D.pick_asset(info, D.MODE_INSTALLER), 'name', None),
+       'ImgSnagWeChat_1.11.0_setup.exe', '安装版挑 setup.exe')
+    eq(getattr(D.pick_asset(info, D.MODE_PORTABLE), 'name', None),
+       'ImgSnagWeChat_1.11.0_portable.zip', '便携版挑 portable.zip')
+    eq(D.pick_asset(U.UpdateInfo(ok=True, assets=[]), D.MODE_INSTALLER), None,
+       '这次没发对应形态的包 → None（界面去提示，不硬塞一个用不上的）')
+
+    # ---- 摘要归一化 ----
+    eq(D.normalize_digest('sha256:' + good), good, 'sha256: 前缀被剥掉')
+    eq(D.normalize_digest(good.upper()), good, '大写十六进制归一成小写')
+    eq(D.normalize_digest('md5:' + good), '', '非 sha256 算法当「没有摘要」（别拿它去比对）')
+    eq(D.normalize_digest(''), '', '空摘要 → 空串')
+    eq(D.normalize_digest('sha256:tooshort'), '', '位数不对的摘要不采信')
+
+    # ---- 正常下载 ----
+    dest = os.path.join(tmp, 'a.bin')
+    got = D.download_file('https://e/a', dest, total=len(payload),
+                          sha256='sha256:' + good, opener=_fake_opener(payload))
+    eq(got, dest, '下载成功返回目标路径')
+    eq(open(dest, 'rb').read(), payload, '落盘内容与源逐字节一致')
+    check(not os.path.exists(dest + '.part'), '成功后不留 .part')
+
+    # ---- 字节数不符（企业网络出口截断长响应就是这个样子） ----
+    dest2 = os.path.join(tmp, 'b.bin')
+    try:
+        D.download_file('https://e/b', dest2, total=len(payload) + 10,
+                        opener=_fake_opener(payload))
+        check(False, '字节数不符时应该报错')
+    except D.DownloadError as exc:
+        check('不完整' in str(exc), '字节数不符 → 提示「下载不完整」')
+    check(not os.path.exists(dest2) and not os.path.exists(dest2 + '.part'),
+          '字节数不符时一个文件都不留（半截文件绝不冒充成品）')
+
+    # ---- 摘要不符 ----
+    dest3 = os.path.join(tmp, 'c.bin')
+    try:
+        D.download_file('https://e/c', dest3, sha256='sha256:' + '0' * 64,
+                        opener=_fake_opener(payload))
+        check(False, '摘要不符时应该报错')
+    except D.DownloadError as exc:
+        check('校验' in str(exc), '摘要不符 → 提示校验不通过')
+    check(not os.path.exists(dest3), '摘要不符时不落位')
+
+    # ---- 取消 ----
+    dest4 = os.path.join(tmp, 'd.bin')
+    state = {'n': 0}
+
+    def _cancel():
+        state['n'] += 1
+        return state['n'] > 2
+
+    try:
+        D.download_file('https://e/d', dest4, cancelled=_cancel,
+                        opener=_fake_opener(payload, chunk=10))
+        check(False, '取消时应该抛 DownloadCancelled')
+    except D.DownloadCancelled:
+        check(True, '取消抛的是 DownloadCancelled（不是普通失败 —— 界面要安静处理）')
+    except D.DownloadError:
+        check(False, '取消被当成了普通下载失败（界面会弹一个假的"失败"）')
+    check(not os.path.exists(dest4) and not os.path.exists(dest4 + '.part'),
+          '取消后不留文件（也不留 .part）')
+
+    # ---- 网络异常翻人话 ----
+    dest5 = os.path.join(tmp, 'e.bin')
+    http404 = requests.HTTPError('HTTP 404')
+    http404.response = type('R', (), {'status_code': 404})()
+    try:
+        D.download_file('https://e/e', dest5, opener=_fake_opener(b'', fail=http404))
+        check(False, '404 应该报错')
+    except D.DownloadError as exc:
+        check('失效' in str(exc) and '发布页' in str(exc),
+              '404 → 人话「地址已失效」并指出下一步（去发布页）')
+    check(not os.path.exists(dest5), '失败不留文件')
+
+    # ---- 已下好的复用判断 ----
+    ok_path = os.path.join(tmp, 'ok.bin')
+    open(ok_path, 'wb').write(payload)
+    check(D.is_ready(ok_path, len(payload), 'sha256:' + good), '已下好且校验通过 → 可复用')
+    check(not D.is_ready(ok_path, len(payload) + 1), '大小对不上 → 不可复用')
+    check(not D.is_ready(ok_path, 0, 'sha256:' + '1' * 64), '摘要对不上 → 不可复用')
+    check(not D.is_ready(os.path.join(tmp, 'nope.bin')), '文件不存在 → 不可复用')
+
+    # ---- 解压便携包 ----
+    zgood = os.path.join(tmp, 'good.zip')
+    with _zip.ZipFile(zgood, 'w') as z:
+        z.writestr('ImgSnagWeChat/ImgSnagWeChat.exe', b'MZ')
+        z.writestr('ImgSnagWeChat/_internal/a.txt', b'a')
+    out = os.path.join(tmp, 'out')
+    exe = D.unpack_portable(zgood, out)
+    eq(os.path.basename(exe), 'ImgSnagWeChat.exe', '解压后能找到主程序')
+    check(os.path.exists(os.path.join(out, 'ImgSnagWeChat', '_internal', 'a.txt')),
+          '子目录一并解出来')
+
+    # ---- Zip Slip：压缩包想把文件写到目标目录外面 ----
+    zbad = os.path.join(tmp, 'bad.zip')
+    with _zip.ZipFile(zbad, 'w') as z:
+        z.writestr('../evil.txt', b'x')
+        z.writestr('ImgSnagWeChat/ImgSnagWeChat.exe', b'MZ')
+    try:
+        D.unpack_portable(zbad, os.path.join(tmp, 'out_bad'))
+        check(False, '越界路径应该被拦住')
+    except D.DownloadError as exc:
+        check('外面' in str(exc) or '中止' in str(exc), '越界路径 → 中止并说明原因')
+    check(not os.path.exists(os.path.join(tmp, 'evil.txt')), '越界文件没被写出去')
+
+    # ---- 坏压缩包 ----
+    zbroken = os.path.join(tmp, 'broken.zip')
+    open(zbroken, 'wb').write(b'not a zip at all')
+    try:
+        D.unpack_portable(zbroken, os.path.join(tmp, 'out2'))
+        check(False, '坏压缩包应该报错')
+    except D.DownloadError as exc:
+        check('损坏' in str(exc), '坏压缩包 → 人话提示重试')
+
+    # ---- 便携版解压目录：放程序目录旁边，带版本号，撞名不覆盖 ----
+    app_dir = os.path.join(tmp, 'ImgSnagWeChat')
+    os.makedirs(app_dir, exist_ok=True)
+    p1 = D.port_dir_for(app_dir, '1.11.0')
+    check('1.11.0' in os.path.basename(p1), '解压目录名带版本号')
+    eq(os.path.dirname(os.path.abspath(p1)), tmp,
+       '解压到程序目录旁边（不丢在下载目录里让用户自己找）')
+    os.makedirs(p1)
+    p2 = D.port_dir_for(app_dir, '1.11.0')
+    check(p2 != p1 and p2.endswith('_2'), '同名已存在 → 另起一个，绝不覆盖上一次的解压结果')
+    eq(D.port_dir_for(p1, '1.11.1'), os.path.join(tmp, 'ImgSnagWeChat_v1.11.1'),
+       '从新版目录再更新一次，名字不会越叠越长（叠成 _v1.11.0_v1.11.1）')
+
+
 def main():
     test_tag_and_compare()
     test_assets()
@@ -473,6 +656,7 @@ def main():
     test_real_fetch_path()
     test_ca_bundle()
     test_cert_error_message()
+    test_update_download()
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

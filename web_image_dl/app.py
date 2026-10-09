@@ -39,6 +39,8 @@ from .settings import (
 from .updater import (
     check_for_updates, UpdateInfo, CHECK_INTERVAL, SOURCE_URL,
 )
+from . import update_dl
+from .update_wizard import UpdateWizard
 
 try:
     from version import VERSION
@@ -82,8 +84,9 @@ ABOUT_HTML = f"""
 · 下载历史：<code>~/.imgsnag_wechat/history.db</code><br>
 · 已屏蔽的尺寸：<code>%APPDATA%\\ImgSnagWeChat\\blocked_sizes.json</code><br>
 · 界面偏好：注册表 <code>HKCU\\Software\\ImgSnagWeChat</code><br>
-程序不收集任何信息、不上报任何数据。唯一的对外请求是「检查更新」——
-它会访问 GitHub 接口，不想联网可以在下方关掉。</p>
+程序不收集任何信息、不上报任何数据。对外的联网只有两处 ——
+「检查更新」与你主动点的「下载更新」，都访问 GitHub；不想被自动检查打扰
+可以在下方关掉（手动点的那两次仍会联网）。</p>
 
 <p><b>源码与反馈</b><br>
 <a href="{SOURCE_URL}">{SOURCE_URL.replace('https://', '')}</a><br>
@@ -1980,63 +1983,26 @@ class ImageDownloaderApp(QMainWindow):
         self.update_hint.setText("")
 
     def _show_update_dialog(self):
-        """发现新版本后的对话框（数据取自最近一次检查结果）。
+        """发现新版本后的入口 —— 打开向导式更新（下载与安装都在程序里完成）。
 
-        只给「前往下载」而不内置下载：本项目的安装包与便携包是两种用法
-        （安装 vs 解压），自动挑一个下反而容易挑错形态 —— 去 Release 页
-        让用户自己选更合适。
+        以前这里只放一个「前往下载」：本项目有两种发行形态（安装包 / 便携包），
+        自动挑一个容易挑错（便携党拿到 setup.exe 只会一脸茫然），所以让用户去
+        Release 页自己选。现在两种形态能自动判断了（见 `update_dl.detect_install_mode`
+        —— 看程序目录里有没有 unins000.exe），就地下载安装比跳浏览器顺畅得多。
+
+        发布页仍然留着，两条路各有各的用处：
+          · 向导里的「前往发布页」—— 下载失败、或这次没发适配本形态的包时的兜底；
+          · 想自己挑形态的高级用户，也还是能找到入口。
         """
         info = self._last_update_info
         if info is None or not info.has_update:
             return
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("发现新版本")
-        dlg.setMinimumSize(540, 420)
-        box = QVBoxLayout(dlg)
-        box.setContentsMargins(20, 16, 20, 14)
-        box.setSpacing(10)
-
-        extra = f"　·　本次发布：{info.assets_text()}" if info.assets else ""
-        head = QLabel(
-            f"<div style='font-size:16px; font-weight:bold;'>发现新版本 v{info.latest}</div>"
-            f"<div style='font-size:12px; color:#666;'>当前版本 v{info.current}{extra}</div>"
-        )
-        head.setTextFormat(Qt.RichText)
-        box.addWidget(head)
-
-        if info.version_mismatch:
-            warn = QLabel("⚠ 这个 Release 的文件名版本号和 tag 不一致，下载前留意一下")
-            warn.setStyleSheet("color:#fa8c16; font-size:11px;")
-            box.addWidget(warn)
-
-        notes = QTextEdit()
-        notes.setReadOnly(True)
-        notes.setPlainText(info.notes.strip() or "（这次发布没有写更新说明）")
-        box.addWidget(notes, 1)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-
-        later_btn = QPushButton("稍后")
-        later_btn.setMinimumHeight(32)
-        later_btn.clicked.connect(dlg.accept)
-        btn_row.addWidget(later_btn)
-
-        go_btn = QPushButton("前往下载")
-        go_btn.setMinimumHeight(32)
-        go_btn.setStyleSheet(
-            "QPushButton { background: #1677ff; color: white; border: none;"
-            " border-radius: 6px; padding: 6px 18px; font-weight: bold; }"
-            "QPushButton:hover { background: #4096ff; }"
-        )
-
-        def _open_page():
-            QDesktopServices.openUrl(QUrl(info.page_url))
-            dlg.accept()
-
-        go_btn.clicked.connect(_open_page)
-        btn_row.addWidget(go_btn)
-        box.addLayout(btn_row)
-
-        dlg.exec()
+        mode = update_dl.detect_install_mode()
+        asset = update_dl.pick_asset(info, mode)
+        wizard = UpdateWizard(info, mode, asset=asset, parent=self)
+        # 安装版点了「立即安装」后必须退出自己：安装器要覆盖程序目录里的文件，
+        # 而这些文件正被本进程占用（.iss 里也没配 CloseApplications，
+        # 安装器不会替我们关）。不退出的话，用户看到的是「装完了还是旧版」。
+        wizard.install_launched.connect(self._quit_app)
+        wizard.exec()

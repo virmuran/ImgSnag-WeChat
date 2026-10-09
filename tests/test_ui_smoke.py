@@ -1269,7 +1269,9 @@ def test_about_and_update(app):
         check('history.db' in html, '写明下载历史存在哪（用户要找回自己的文件）')
         check('PySide6' in html, '列明第三方依赖')
         check('不收集任何信息' in html, '写清隐私态度')
-        check('检查更新' in html, '说明唯一会联网的地方就是检查更新（说实话）')
+        check('检查更新' in html and '下载更新' in html,
+              '联网说明如实覆盖「检查更新」与「下载更新」两处（v1.11.2 起下载也会联网，'
+              '再写「唯一」就是假话）')
         check('检查更新' in seen.get('buttons', []), '对话框里有「检查更新」按钮')
         check('关闭' in seen.get('buttons', []), '对话框里有「关闭」按钮')
         check(any('自动检查' in t for t in seen.get('check_texts', [])),
@@ -1329,28 +1331,32 @@ def test_about_and_update(app):
         eq(getattr(win._last_update_info, 'latest', None), '1.6.0', '检查结果被留存下来（对话框要用）')
         check(settings.get(K_LAST_UPDATE_CHECK) > 1, '记下本次检查时间（供 6 小时节流）')
 
-        # ---- e) 更新对话框（点提示走的就是这里） ----
+        # ---- e) 更新向导（点提示走的就是这里） ----
+        # 向导与「关于」一样是 exec() 模态，抓法相同：QWizard 继承 QDialog。
         dlg = {}
 
         def grab_update(w):
             dlg['opened'] = True
+            dlg['title'] = w.windowTitle()
             dlg['labels'] = [c.text() for c in w.findChildren(QLabel)]
             dlg['notes'] = [c.toPlainText() for c in w.findChildren(QTextEdit)]
             dlg['buttons'] = [c.text() for c in w.findChildren(QPushButton)]
 
-        _grab_and_close_dialog('发现新版本', grab_update)
+        _grab_and_close_dialog('软件更新', grab_update)
         win._show_update_dialog()
         QApplication.processEvents()
 
-        check(dlg.get('opened'), '更新对话框能打开')
+        check(dlg.get('opened'), '更新向导能打开')
         joined = ' '.join(dlg.get('labels', []))
-        check('1.6.0' in joined, '对话框里写明新版本号')
-        check('1.5.0' in joined, '对话框里写明当前版本（用户要能确认自己在哪一版）')
-        check('安装包' in joined and '便携包' in joined,
-              '告知这次发布有哪些文件（安装包/便携包由用户自己选）')
+        check('1.6.0' in joined, '向导里写明新版本号')
+        check('1.5.0' in joined, '向导里写明当前版本（用户要能确认自己在哪一版）')
+        check('安装包' in joined,
+              '告知这次发布的文件（界面要能说清下载的是哪种形态）')
         eq(dlg.get('notes'), ['## v1.6.0\n- 新增关于与检查更新'], '更新说明原文显示出来')
-        check('前往下载' in dlg.get('buttons', []), '有「前往下载」按钮')
         check('稍后' in dlg.get('buttons', []), '有「稍后」按钮（不强迫用户现在升级）')
+        check('下一步' in dlg.get('buttons', []), '第一页的下一步是「下一步」')
+        check('前往发布页' in dlg.get('buttons', []),
+              '留了去发布页的兜底入口（下载失败 / 想自己挑形态时还有去处）')
 
         # ---- f) 已是最新 / 失败，以及静默时一律安静 ----
         box_msgs = []
@@ -2048,6 +2054,188 @@ def test_copy_title(app):
         QApplication.processEvents()
 
 
+def test_update_wizard(app):
+    """v1.12.0 桌面版应用内更新（UI-29）。
+
+    以前「发现新版本」只能跳浏览器去 Release 页。桌面版跟安卓版一样，更新本来就该
+    在程序里走完。这里钉住向导里几件**容易做错、做错了还不报错**的事：
+
+    a) 按运行形态挑对文件 —— 安装版要 `*_setup.exe`、便携版要 `*_portable.zip`。
+       挑错了用户会下到一个用不上的包，而他多半不会意识到是下错了。
+    b) 第一页要写清「从哪一版到哪一版」+ 更新说明，并**保留去发布页的兜底入口**。
+    c) 下载真的走下载链路（注入假下载器，不联网），下完自动进完成页；
+       失败要停在下载页并把原因说出来、给一个「重新下载」的出口，不许冒充成功。
+    d) 便携版解压到**带版本号的独立目录**，绝不覆盖用户正在用的那一份。
+    e) 安装版点「立即安装」要先关掉向导、再请主窗口退出 —— 反过来的话，
+       向导会挂在屏幕上等 `_shutdown()`，用户看到的是「点了没反应」。
+    """
+    import shutil
+    import zipfile
+
+    from PySide6.QtWidgets import QLabel, QPushButton, QWizard
+
+    from web_image_dl import update_dl
+    from web_image_dl import updater as U
+    from web_image_dl.update_wizard import UpdateWizard, PAGE_DOWNLOAD, PAGE_DONE, PAGE_INTRO
+
+    print('\n[UI-29] 应用内更新向导（挑形态 / 下载 / 失败退路 / 两形态收尾）')
+
+    info = U.UpdateInfo(
+        ok=True, current='1.10.0', latest='1.11.0', tag='v1.11.0', has_update=True,
+        notes='## v1.11.0\n- 应用内更新',
+        page_url='https://example.com/release',
+        assets=[
+            U.AssetInfo('ImgSnagWeChat_1.11.0_setup.exe', 'installer', 100,
+                        'https://example.com/a.exe', '1.11.0'),
+            U.AssetInfo('ImgSnagWeChat_1.11.0_portable.zip', 'portable', 100,
+                        'https://example.com/b.zip', '1.11.0'),
+        ],
+    )
+
+    with _isolated_config():
+        tmp = tempfile.mkdtemp(prefix='imgsnag_upd_')
+        # 下载目录指到临时目录：真实目录里可能还留着上一次下好的同名文件，
+        # 那样 `is_ready` 会直接复用、假下载器根本不会被调用（用例就悄悄失效了）
+        orig_update_dir = update_dl.update_dir
+        orig_launch = update_dl.launch_installer
+        orig_reveal = update_dl.reveal_folder
+        orig_app_dir = update_dl.app_dir
+        update_dl.update_dir = lambda: tmp
+        update_dl.launch_installer = lambda p: True
+        update_dl.reveal_folder = lambda p: True
+        # 程序目录也指到临时目录：便携版会把新版解压到「程序目录旁边」，
+        # 真跑的话会往 venv/Scripts 上一级写东西 —— 测试绝不能碰工程目录
+        update_dl.app_dir = lambda: os.path.join(tmp, 'app')
+        try:
+            # ---- a) 按形态挑文件 ----
+            inst_asset = update_dl.pick_asset(info, update_dl.MODE_INSTALLER)
+            eq(getattr(inst_asset, 'kind', None), 'installer', '安装版挑到的是 setup.exe')
+            port_asset = update_dl.pick_asset(info, update_dl.MODE_PORTABLE)
+            eq(getattr(port_asset, 'kind', None), 'portable', '便携版挑到的是 portable.zip')
+            eq(update_dl.pick_asset(U.UpdateInfo(ok=True, assets=[]), update_dl.MODE_INSTALLER),
+               None, '这次没发对应形态的包 → 返回 None（交给界面去提示，不硬塞一个）')
+
+            calls = []
+
+            def fake_download(url, dest, *, total=0, sha256='', progress=None,
+                              cancelled=None):
+                calls.append(url)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                payload = b'X' * 64
+                with open(dest, 'wb') as f:
+                    f.write(payload)
+                if progress:
+                    progress(len(payload), total or len(payload))
+                return dest
+
+            # ---- b) 第一页：版本对比 + 更新说明 + 发布页兜底 ----
+            wiz = UpdateWizard(info, update_dl.MODE_INSTALLER, asset=inst_asset,
+                               downloader=fake_download)
+            wiz.show()
+            QApplication.processEvents()
+            eq(wiz.currentId(), PAGE_INTRO, '打开时停在第 1 页')
+            labels = ' '.join(c.text() for c in wiz.findChildren(QLabel))
+            check('1.10.0' in labels and '1.11.0' in labels,
+                  '第一页写明「从哪一版到哪一版」')
+            check('应用内更新' in wiz.notes_view.toPlainText(), '更新说明原文显示出来')
+            check(any(c.text() == '前往发布页' for c in wiz.findChildren(QPushButton)),
+                  '留了去发布页的兜底入口')
+            eq(wiz.button(QWizard.CancelButton).text(), '稍后',
+               '取消按钮叫「稍后」（不是「取消」，这是「先不更新」不是「放弃」）')
+
+            # ---- c) 下载页：真走下载链路，下完自动进完成页 ----
+            wiz.next()
+            eq(wiz.currentId(), PAGE_DOWNLOAD, '进入下载页')
+            check(wiz._thread is not None, '下载线程已启动')
+            if wiz._thread is not None:
+                wiz._thread.wait(10000)
+            QApplication.processEvents()
+            eq(len(calls), 1, '假下载器被调用了一次（证明真的走了下载链路）')
+            eq(wiz.currentId(), PAGE_DONE, '下载完成后自动进完成页')
+            eq(wiz.button(QWizard.FinishButton).text(), '立即安装',
+               '安装版的收尾按钮是「立即安装」')
+
+            # ---- e) 安装版收尾：启动安装器 + 请主窗口退出 ----
+            fired = []
+            wiz.install_launched.connect(lambda: fired.append(1))
+            wiz.accept()
+            QApplication.processEvents()
+            eq(len(fired), 1, '点「立即安装」会请主窗口退出（否则安装器覆盖不了程序文件）')
+            eq(wiz.isVisible(), False, '向导先关掉再退出（反了就是「点了没反应」）')
+
+            # ---- 下载失败：停在下载页说实话，并给出口 ----
+            def broken_download(url, dest, **kw):
+                raise update_dl.DownloadError('下载地址已失效（这个版本的文件可能已被撤下）')
+
+            wiz_fail = UpdateWizard(info, update_dl.MODE_INSTALLER, asset=inst_asset,
+                                    downloader=broken_download)
+            wiz_fail.show()
+            QApplication.processEvents()
+            wiz_fail.next()
+            if wiz_fail._thread is not None:
+                wiz_fail._thread.wait(10000)
+            QApplication.processEvents()
+            eq(wiz_fail.currentId(), PAGE_DOWNLOAD, '下载失败 → 停在下载页，不冒充成功')
+            check(wiz_fail._dl_error.isVisible(), '把失败原因显示出来')
+            check('失效' in wiz_fail._dl_error.text(), '原因是人话（含可操作建议）')
+            check(wiz_fail.retry_btn.isVisible(), '给一个「重新下载」的出口')
+            wiz_fail.close()
+            QApplication.processEvents()
+
+            # ---- d) 便携版：解压到带版本号的独立目录 ----
+            src_dir = tempfile.mkdtemp(prefix='imgsnag_zipsrc_')
+            src_zip = os.path.join(src_dir, 'portable_src.zip')
+            with zipfile.ZipFile(src_zip, 'w') as z:
+                z.writestr('ImgSnagWeChat/ImgSnagWeChat.exe', b'MZ')
+                z.writestr('ImgSnagWeChat/_internal/keep.txt', b'x')
+
+            def fake_portable(url, dest, **kw):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copyfile(src_zip, dest)
+                if kw.get('progress'):
+                    kw['progress'](os.path.getsize(dest), os.path.getsize(dest))
+                return dest
+
+            wiz2 = UpdateWizard(info, update_dl.MODE_PORTABLE, asset=port_asset,
+                                downloader=fake_portable)
+            wiz2.show()
+            QApplication.processEvents()
+            wiz2.next()
+            if wiz2._thread is not None:
+                wiz2._thread.wait(20000)
+            QApplication.processEvents()
+            eq(wiz2.currentId(), PAGE_DONE, '便携版下完也进完成页')
+            port_dir = wiz2._result.get('port_dir') or ''
+            check(bool(port_dir) and os.path.isdir(port_dir), f'解压到一个独立目录（{port_dir}）')
+            check('1.11.0' in os.path.basename(port_dir), '目录名带版本号')
+            eq(os.path.dirname(os.path.abspath(port_dir)),
+               os.path.dirname(os.path.abspath(update_dl.app_dir())),
+               '解压到程序目录旁边（丢在下载目录里用户找不到给自己换）')
+            check(os.path.exists(os.path.join(port_dir, 'ImgSnagWeChat', 'ImgSnagWeChat.exe')),
+                  '新版主程序真的解压出来了')
+            eq(wiz2.button(QWizard.FinishButton).text(), '打开新版文件夹',
+               '便携版的收尾按钮是「打开新版文件夹」（不替用户换掉正在用的那份）')
+            wiz2.accept()
+            QApplication.processEvents()
+            check(wiz2.isVisible() is False, '便携版点完成后只开文件夹，不退出程序')
+
+            # ---- 取消：退回第一页，不留半截结果 ----
+            wiz3 = UpdateWizard(info, update_dl.MODE_INSTALLER, asset=inst_asset,
+                                downloader=fake_download)
+            wiz3.show()
+            QApplication.processEvents()
+            wiz3._on_cancelled()
+            eq(wiz3.currentId(), PAGE_INTRO, '取消下载 → 退回第一页（不是把向导关掉）')
+            eq(wiz3._result, {}, '取消后不留半截结果（免得「完成」拿到不存在的文件）')
+            wiz3.close()
+            QApplication.processEvents()
+        finally:
+            update_dl.update_dir = orig_update_dir
+            update_dl.launch_installer = orig_launch
+            update_dl.reveal_folder = orig_reveal
+            update_dl.app_dir = orig_app_dir
+
+
 def main():
     app = QApplication.instance() or QApplication([])
 
@@ -2063,31 +2251,52 @@ def main():
 
     CloseChoiceDialog.exec = _no_block_exec
 
-    test_preview_scale(app)
-    test_cancel_button(app)
-    test_copy_matches_impl(app)
-    test_shutdown_with_running_thread(app)
-    test_download_through_gui(app)
-    test_preview_zoom(app)
-    test_thumbnail_card(app)
-    test_hidden_hint(app)
-    test_select_all_button(app)
-    test_history_search(app)
-    test_empty_guide_and_enter(app)
-    test_zoom_anchor(app)
-    test_space_pan(app)
-    test_pan_guards(app)
-    test_pan_real_path(app)
-    test_direct_drag_is_primary(app)
-    test_blocked_panel(app)
-    test_settings_persist(app)
-    test_about_and_update(app)
-    test_auto_library_folder(app)
-    test_history_missing_marker(app)
-    test_reparse_and_action_row(app)
-    test_browse_history_batch(app)
-    test_reparse_keeps_download(app)
-    test_copy_title(app)
+    # 用例表：标签 = 用例自己 print 出来的那个编号。
+    # 为什么要列表驱动：反向验证（tools/check_desktop_reverse.py）每拆坏一处就要
+    # 跑一次测试，而本文件全套要 30 秒 —— 拆 6 处就是三分钟，太慢。
+    # 有了它就能 `IMGSNAG_UI_ONLY=UI-29` 只跑目标那一条（3 秒）。
+    # ⚠ 标签写错的表现是「这条用例压根没跑」，而反向验证会把"拆坏了还不红"
+    #   报成"断言是假的" —— 所以错了会当场暴露，不会静默漏测。
+    cases = [
+        ('UI-1', lambda: test_preview_scale(app)),
+        ('UI-5', lambda: test_cancel_button(app)),
+        ('UI-6', lambda: test_copy_matches_impl(app)),
+        ('UI-7', lambda: test_shutdown_with_running_thread(app)),
+        ('UI-8', lambda: test_download_through_gui(app)),
+        ('UI-9', lambda: test_preview_zoom(app)),
+        ('UI-10', lambda: test_thumbnail_card(app)),
+        ('UI-11', lambda: test_hidden_hint(app)),
+        ('UI-12', lambda: test_select_all_button(app)),
+        ('UI-13', lambda: test_history_search(app)),
+        ('UI-14', lambda: test_empty_guide_and_enter(app)),
+        ('UI-15', lambda: test_zoom_anchor(app)),
+        ('UI-16', lambda: test_space_pan(app)),
+        ('UI-17', lambda: test_pan_guards(app)),
+        ('UI-18', lambda: test_pan_real_path(app)),
+        ('UI-19', lambda: test_direct_drag_is_primary(app)),
+        ('UI-20', lambda: test_blocked_panel(app)),
+        ('UI-21', lambda: test_settings_persist(app)),
+        ('UI-22', lambda: test_about_and_update(app)),
+        ('UI-23', lambda: test_auto_library_folder(app)),
+        ('UI-24', lambda: test_history_missing_marker(app)),
+        ('UI-25', lambda: test_reparse_and_action_row(app)),
+        ('UI-26', lambda: test_browse_history_batch(app)),
+        ('UI-27', lambda: test_reparse_keeps_download(app)),
+        ('UI-28', lambda: test_copy_title(app)),
+        ('UI-29', lambda: test_update_wizard(app)),
+    ]
+
+    only = os.environ.get('IMGSNAG_UI_ONLY', '').strip()
+    ran = 0
+    for label, fn in cases:
+        if only and only != label:
+            continue
+        fn()
+        ran += 1
+    if only and ran == 0:
+        print(f'✗ 没有标签为 {only} 的用例（标签写错了？）')
+        sys.exit(2)
+
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:
