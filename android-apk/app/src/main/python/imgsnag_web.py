@@ -163,16 +163,14 @@ _MIME = {
 #: 这个只是"机器上次问到的答案"，混在一起会让 normalize_settings 的意图变模糊。
 UPDATE_FILE = 'update_check.json'
 
-#: 问哪个接口。安卓安装包挂在**滚动的预发布位** `apk-latest` 上：
-#: 每次云构建都先删掉整个 release 再重建，所以资产上的创建时间就是那次构建的时间。
-#: ⚠ 不能沿用桌面版那个 `/releases/latest` —— 它**只返回正式发布**，
-#: 看不见这个预发布位，结果是安卓版永远显示"已是最新"，而且不报任何错。
-#: 仓库名从同步来的 updater 里取，两处不会漂移。
-APK_RELEASE_TAG = 'apk-latest'
+#: 问哪个接口。读**正式发布位** `/releases/latest`：每次正式发版，云构建都会把
+#: APK 自动补进那个 Release（exe / 便携 zip / APK 三种形态并排），所以正式发布里
+#: 永远有一份最新的安卓安装包。曾经读的是滚动预发布位 `apk-latest`（每次推送重建），
+#: 但预发布对所有人可见，等于把下载入口弄成两个 —— 已取消，与桌面版同源；
+#: 解析用的也是同一份 `updater`，两处不会漂移。
 APK_API_URL = (f'https://api.github.com/repos/{updater.GITHUB_REPO}'
-               f'/releases/tags/{APK_RELEASE_TAG}')
-APK_PAGE_URL = (f'https://github.com/{updater.GITHUB_REPO}'
-                f'/releases/tag/{APK_RELEASE_TAG}')
+               f'/releases/latest')
+APK_PAGE_URL = f'https://github.com/{updater.GITHUB_REPO}/releases/latest'
 
 #: 判定"有新版本"的宽限期（毫秒）。手机时钟与 GitHub 的服务器时钟总有几秒差，
 #: 不留余量的话"刚装完就提示有新版本"会反复出现 —— 用户只能学会无视它。
@@ -1114,16 +1112,16 @@ class Engine:
         return json.loads(resp.text or '{}') or {}
 
     def check_update(self, installed_at: int = 0, force: bool = False) -> dict:
-        """问 GitHub：`apk-latest` 上那个安装包是不是比本机装的更新。
+        """问 GitHub：正式发布里那个安装包是不是比本机装的更新。
 
         **判据是版本号**（从资产名里抠出来，形如
-        `ImgSnag_1.11.0_android_arm64.apk`）—— 滚动发布位的 tag 里没有版本号，
-        但文件名里有，这是当初只能"比构建时间"之后补上的更准的一条路。
+        `ImgSnag_1.11.0_android_arm64.apk`）—— 文件名跟着版本走，
+        这是当初只能"比时间"之后补上的更准的一条路。
 
-        构建时间降级为**兜底**，只在两种情况下用：
+        发布时间降级为**兜底**，只在两种情况下用：
           · 两边有一边的版本号认不出来（改过命名规则、老包没有版本号）
-          · 版本号相同 —— tag 与版本号都没变但重新构建过（迭代期很常见），
-            这时"构建时间比本机安装时间新"就是唯一能发现更新的线索
+          · 版本号相同 —— 版本号没变但发布内容更新过（资产被重新传了一遍），
+            这时"发布时间比本机安装时间新"就是唯一能发现更新的线索
         比较逻辑用 `updater.compare_versions`（三端**同一份**实现），
         不在这儿另写一套。
 

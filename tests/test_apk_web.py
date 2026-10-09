@@ -825,9 +825,9 @@ APK_CREATED = '2026-10-06T07:12:33Z'        # 远端那个安装包的构建时�
 APK_INSTALLED = '2026-10-06T07:00:00Z'      # 本机上装着的那一份的时刻（UTC）
 
 
-def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest', digest='',
+def release_json(created=APK_CREATED, name=APK_ASSET, tag='v1.10.0', digest='',
                  size=11500000):
-    """GitHub「按 tag 取某个发布」的假响应（只放我们真正会读的字段）。
+    """GitHub「取最新正式发布」的假响应（只放我们真正会读的字段）。
 
     故意混一个非 .apk 的资产进去：挑错了就会拿一个文本文件的时间去比，
     而这种错**不会报任何错**，只是"永远说已是最新"。
@@ -848,7 +848,7 @@ def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest', digest='
         apk['digest'] = digest
     return json.dumps({
         'tag_name': tag,
-        'html_url': 'https://github.com/virmuran/ImgSnag-WeChat/releases/tag/apk-latest',
+        'html_url': 'https://github.com/virmuran/ImgSnag-WeChat/releases/latest',
         'body': '更新说明',
         'assets': [
             {'name': '0-readme.txt', 'size': 12, 'browser_download_url': '',
@@ -859,7 +859,15 @@ def release_json(created=APK_CREATED, name=APK_ASSET, tag='apk-latest', digest='
 
 
 def test_update_check():
-    print('[13] 检查更新：比版本号为主、比构建时间为兜底')
+    print('[13] 检查更新：比版本号为主、比发布时间为兜底')
+    # 更新检查问的是**正式发布位**。这个 URL 曾经指向滚动的预发布位 apk-latest，
+    # 预发布位取消后改读 /releases/latest —— 这里钉死，防止将来被悄悄改回去
+    # （改回去的表现完全静默：apk-latest 一删，所有旧包永远"问不到"）。
+    # ⚠ 只断言"新 URL 在、旧 URL 形态不在"，不断言 "apk-latest" 这个词 ——
+    #   注释里讲历史时还会提到它（反向验证抓过的教训：别把断言绑在注释词上）。
+    src = read(WEB_PY)
+    check('/releases/latest' in src, '更新检查读的是正式发布位（与桌面版同源）')
+    check('releases/tags/' not in src, '不再读按 tag 取的滚动预发布位')
     installed = web.iso_ms(APK_INSTALLED)
     check(installed > 0, '测试自己的时间戳算得出来（ISO 末尾带 Z 也要认）')
     #: 远端那个包的构建时刻，比"本机安装时刻"**早**一小时。
@@ -877,9 +885,9 @@ def test_update_check():
         #    如果代码还在"比时间"，本条会红。这就是这次改造的重点。
         r = cli.json(f'/api/update?at={installed}&force=1')
         check(r['ok'], f'问到了远端信息：{r.get("error")!r}')
-        eq(r['remote_version'], '1.10.0', '版本号从资产名里读出来（tag 里没有版本号）')
+        eq(r['remote_version'], '1.10.0', '版本号从资产名里读出来')
         eq(r['remote_ms'], web.iso_ms(APK_CREATED), '取的是 .apk 那个资产的时间')
-        check(r['remote_time'], f'构建时间给成人话：{r["remote_time"]!r}')
+        check(r['remote_time'], f'远端时间给成人话：{r["remote_time"]!r}')
         # 显示的必须是**本地时区**的时间。GitHub 给的是 UTC，不转的话
         # "今天 07:12 构建"其实是北京 15:12 —— 用户会以为那不是自己刚推的那次。
         local = datetime.fromisoformat(APK_CREATED.replace('Z', '+00:00')).astimezone()
@@ -903,7 +911,7 @@ def test_update_check():
         web.stop()
         cli3, _, _ = _boot(tmp, fake=fake, version='1.10.0')
         check(cli3.json(f'/api/update?at={installed}&force=1')['has_update'],
-              '版本号相同但远端构建更晚 → 提示更新（滚动预发布位会重新构建）')
+              '版本号相同但远端时间更晚 → 提示更新（同版本重传资产时的兜底判据）')
 
         # ④ 宽限期：版本号相同、时间只差 30 秒 → 不算。
         #    手机时钟与 GitHub 服务器总有几秒差，不留余量的话"刚装完就提示有新版本"

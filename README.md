@@ -13,7 +13,7 @@
     <img alt="deps" src="https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-requests%20%2B%20PySide6-Essentials-blue">
 </div>
 <div>
-    <img alt="version" src="https://img.shields.io/badge/version-1.11.2-green">
+    <img alt="version" src="https://img.shields.io/badge/version-1.11.3-green">
     <img alt="stars" src="https://img.shields.io/github/stars/virmuran/ImgSnag-WeChat?style=social">
 </div>
 <br>
@@ -130,7 +130,7 @@ python -m venv .venv
 
 装个正常的安卓应用：在微信里 **分享 → ImgSnag**，图就进系统相册了。不用装 Termux，不用敲命令。
 
-**APK 由 GitHub 的服务器自动编译** —— 推送代码后去 **Releases** 下载 `apk-latest` 里那个 `.apk` 即可，和下载桌面版安装包是同一个操作；**正式发版时会自动把 APK 补进同一个版本页面**，于是那一个 Release 下面 exe、便携 zip、APK 三种形态并排，你只需要记住一个下载入口。为什么要放云上编译、怎么装、红米要绕什么，都写在 **[`android-apk/README.md`](android-apk/README.md)**。
+**APK 由 GitHub 的服务器自动编译** —— **正式发版时自动把 APK 补进同一个版本页面**，于是那一个 Release 下面 exe、便携 zip、APK 三种形态并排，你只需要记住一个下载入口（去 **Releases** 点最新版本，和下载桌面版安装包是同一个操作）。为什么要放云上编译、怎么装、红米要绕什么，都写在 **[`android-apk/README.md`](android-apk/README.md)**。
 
 ### Termux 命令行版
 
@@ -389,6 +389,18 @@ ImgSnag-WeChat/
 
 > 本段与 GitHub Release 正文使用**完全相同**的内容 —— 写一次，两处直接粘贴，不会出现两种说法。
 > 格式规范见 [`RELEASE_NOTES_TEMPLATE.md`](RELEASE_NOTES_TEMPLATE.md)；发版前跑 `python tools/check_release_notes.py` 校验两处逐字一致。
+
+### v1.11.3 (2026-10-09)
+
+Releases 页不再出现「自动构建」预发布，安卓版检查更新与桌面版一样指向最新正式版本。
+
+**改进**
+- Releases 页不再生成「自动构建」预发布，安卓与桌面安装包都在同一个版本页里
+- 安卓版「检查更新」改为指向最新正式版本，与桌面版同一个来源
+
+**兼容性提示**
+- v1.11.2 及更早的安卓版需手动安装一次本版，之后应用内更新恢复正常
+- 历史数据与偏好不受影响
 
 ### v1.11.2 (2026-10-09)
 

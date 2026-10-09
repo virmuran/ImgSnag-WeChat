@@ -497,21 +497,24 @@ def test_workflow():
           '直接下载钉死的 Gradle 8.13（与 Chaquopy 17.0.0 官方配套一致，不依赖镜像自带版本）')
     check('actions/upload-artifact@v4' in wf, '把 APK 作为构建产物上传')
     check('contents: write' in wf, '给了发布 Release 的权限')
-    check('gh release delete' in wf and 'gh release create' in wf,
-          '更新 apk-latest 预发布')
-    check('apk-latest' in wf, '发布位置固定为 apk-latest（下载入口只有一个）')
     check('types: [published]' in wf, '正式发版（Publish Release）时自动给该版本补挂 APK')
     check('gh release upload' in wf, 'APK 会附加到对应的版本 Release（exe/zip/apk 并排）')
     check("!= 'apk-latest'" in wf, 'apk-latest 被手动 Publish 时不会触发套娃构建')
+    check('gh release delete' not in wf and '--prerelease' not in wf,
+          '不再发布 apk-latest 预发布位（下载入口只有正式 Release）')
+    check('workflow_dispatch' in wf, '留着手动按钮（不改版本号也能试出一版包）')
     check('keytool -list' in wf, '构建前先验一次签名密钥能否被 JDK 读取')
     check('libpython3' in wf, '验包会检查 libpython 是否真的进了包')
     check('unzip -l' in wf, '验包看的是包内实际内容')
     check('dump badging' in wf, '图标/包名用 aapt2 badging 判定（不按 res 文件名找，路径会被优化掉）')
     check('test_apk_app.py' in wf, '打包前先跑本文件的快速自检')
 
-    # 触发的路径要覆盖会影响 APK 的一切
-    for p in ('android-apk/**', 'web_image_dl/**', 'android/sync_core.py', 'version.py'):
-        check(f"'{p}'" in wf, f'改动 {p} 时会触发构建')
+    # 推送不再自动构建（预发布位已取消）；只剩「手动」与「正式发版」两种触发。
+    # 曾经这里钉的是"推送会触发构建的路径覆盖"，触发器删掉后反过来钉它不在。
+    # ⚠ 缩进按 YAML 里 on: 的真实子键来（2 空格）——写成 4 空格的话，
+    #   把 push 加回去它也不会红（反向验证实测抓出来的）。
+    check(re.search(r'^  push:', wf, re.M) is None,
+          '推送代码不再自动构建（预发布位已取消，只保留手动与发版两种触发）')
 
     # 真·YAML 解析 —— GitHub 只在推送之后才报语法错，等一次要几分钟。
     # pyyaml 装了就严格解析；没装则退回「顶层键」兜底检查。

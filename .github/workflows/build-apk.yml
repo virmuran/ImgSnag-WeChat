@@ -7,11 +7,14 @@
 # 公开仓库还免费用、不限量。所以这里一行 apt 都不用装。
 #
 # ── 怎么用 ──
-#   日常：往 main 分支推送、且改动涉及 android-apk/ 或本文件时自动跑，
-#         APK 挂到 Releases 的 apk-latest（滚动预发布位，永远只有"最新"一个答案）
 #   发版：在 GitHub 上 Publish 一个正式版本 Release（vX.Y.Z，先传好 exe 和便携 zip）——
-#         本工作流会自动给这个 Release 补上 APK，三种形态并排出现
+#         本工作流自动构建并把 APK 补进这个 Release，三种形态并排出现
 #   手动：仓库页面 → Actions → 左侧 "Build Android APK" → Run workflow
+#         （只出构建记录底部的 artifact，不碰 Release）
+#
+#   ⚠ 推送代码**不再**自动构建。曾经每次推送都把 APK 刷到 Releases 的 apk-latest
+#     滚动预发布位，但预发布对所有人可见，等于把下载入口弄成两个 —— 已取消；
+#     安卓应用内更新改读正式发布位（与桌面版同源）。
 #
 # ── 为什么自己下载 Gradle ──
 # Chaquopy 17.0.0 官方配套的是 Gradle 8.13，版本不对会报很难懂的错。
@@ -21,17 +24,9 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'android-apk/**'
-      - 'web_image_dl/**'          # 站点规则改了也要重打包：副本是同步进来的
-      - 'android/sync_core.py'
-      - 'version.py'
-      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:               # 手动：只出 artifact，不碰 Release
   release:
-    types: [published]             # 正式发版时，把 APK 补进同一个 Release
+    types: [published]             # 正式发版：把 APK 补进那个 Release
 
 permissions:
   contents: write                  # 需要它才能把 APK 挂到 Release
@@ -43,8 +38,8 @@ concurrency:
 
 jobs:
   build:
-    # 防套娃：apk-latest 是本工作流自己发布的预发布位，
-    # 如果哪天它被手动 Publish，不能再触发一轮"给它发版"
+    # 防套娃：apk-latest 预发布位已取消，但旧的那个 Release 可能还没删干净，
+    # 万一它被手动 Publish 成正式发布，不能再触发一轮"给它发版"
     if: github.event_name != 'release' || github.event.release.tag_name != 'apk-latest'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -178,32 +173,6 @@ jobs:
           name: ImgSnag-APK-${{ steps.pack.outputs.version }}
           path: ${{ steps.pack.outputs.apk }}
           if-no-files-found: error
-
-      # 挂到固定的 apk-latest 预发布上 —— 这样"去哪儿下"永远只有一个答案，
-      # 不用在 Actions 里翻构建记录、也不用解 zip。
-      - name: 发布到 Releases（apk-latest）
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG=apk-latest
-          gh release delete "$TAG" --yes --cleanup-tag > /dev/null 2>&1 || true
-          gh release create "$TAG" "${{ steps.pack.outputs.apk }}" \
-            --title "ImgSnag 安卓版 v${{ steps.pack.outputs.version }}（自动构建）" \
-            --prerelease \
-            --notes "由 GitHub Actions 自动构建，每次推送更新。
-
-          **下载下面这个 .apk 文件**，传到手机点击安装即可（小米/红米需在弹窗里允许「安装未知应用」）。
-
-          | 项目 | 值 |
-          |---|---|
-          | 版本 | v${{ steps.pack.outputs.version }} |
-          | 架构 | arm64-v8a（红米 K80 等主流手机） |
-          | 系统要求 | Android 10 及以上 |
-          | 提交 | \`${{ github.sha }}\` |
-
-          只申请了「网络访问」与「安装应用」两个权限 —— 后者只用于应用内更新（App 自己下好新版本交给系统装，不会在后台悄悄装东西）；图片存到相册的 \`Pictures/ImgSnagWeChat/\` 下。
-
-          > 这是个**预发布**草稿位，只为方便下载，不是正式版本发布。"
 
       # 正式发版（Publish 一个 vX.Y.Z 的 Release，exe 和便携 zip 已在里面）时触发：
       # 把刚构建好的 APK 也塞进同一个 Release —— 三种形态并排，下载入口永远只有那一页。
