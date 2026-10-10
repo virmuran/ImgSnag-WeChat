@@ -198,7 +198,7 @@ def test_out_dir():
 
         os.environ['IMGSNAG_OUT'] = '  '
         d = imgsnag.default_out_dir()
-        check('ImgSnagWeChat' in d or d.endswith('imgsnag_downloads'),
+        check('ImgSnag' in d or d.endswith('imgsnag_downloads'),
               '空白环境变量被忽略，走默认')
     finally:
         if old is None:
@@ -407,6 +407,121 @@ def test_headers():
     check('Referer' not in imgsnag.HEADERS, '模块级 HEADERS 不被污染')
 
 
+def test_download_referer():
+    print('[15b] 下载 Referer 由站点决定：微信照旧带、cosmeitu 不带')
+    cos_url = 'https://www.cosmeitu.com/12345.html'
+    cos_html = (
+        '<html><body>'
+        '<h1 class="article-title">某作品 | 某coser</h1>'
+        '<span>📸 Coser：某coser</span>'
+        '<img data-src="https://hk.66372188.xyz/2026/10/08/only.jpg" title="某作品 (1/1)">'
+        '</body></html>'
+    )
+    tmp = tempfile.mkdtemp()
+    try:
+        seen = []
+
+        def get(url, headers=None, timeout=None, allow_redirects=None, **kw):
+            h = dict(headers or {})
+            if url.startswith('https://mp.weixin.qq.com/'):
+                return FakeResp(text=ARTICLE)
+            if url.startswith(cos_url):
+                return FakeResp(text=cos_html)
+            seen.append((url, h))       # 只记真正下载图片的那几次
+            return FakeResp(content=JPEG)
+
+        res = imgsnag.snag(ARTICLE_URL, out_root=tmp, get=get, log=quiet,
+                           when=datetime(2026, 10, 5, 15, 55, 3))
+        check(res.ok, '微信流程照常跑通')
+        wx = [h for u, h in seen if 'mmbiz.qpic.cn' in u]
+        check(wx and all(h.get('Referer') == ARTICLE_URL for h in wx),
+              '微信那条路**仍然**带 Referer —— 不能为了修 cosmeitu 一刀切去掉')
+
+        seen.clear()
+        res2 = imgsnag.snag(cos_url, out_root=tmp, get=get, log=quiet,
+                            when=datetime(2026, 10, 5, 15, 55, 4))
+        check(res2.ok, 'cosmeitu 流程跑通')
+        cos = [h for u, h in seen if '66372188.xyz' in u]
+        check(cos and all('Referer' not in h for h in cos),
+              'cosmeitu 下载**不带** Referer（带了整批 403，一张都下不来）')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_credit_file():
+    print('[15c] 来源署名与「来源说明.txt」')
+    cos_url = 'https://www.cosmeitu.com/12345.html'
+    plain_url = 'https://www.cosmeitu.com/12346.html'
+    cos_html = (
+        '<html><body>'
+        '<h1 class="article-title">某作品 | 某coser</h1>'
+        '<span>\U0001f4f8 Coser：洛城雪Yuki</span>'
+        '<img data-src="https://hk.66372188.xyz/2026/10/08/only.jpg" '
+        'title="某作品 (1/1)">'
+        '</body></html>'
+    )
+    #: 没有 Coser 那一行的篇目（本站的"美图精选"就是这样）——
+    #: 这时**不该编一个名字**，如实写站点名即可
+    plain_html = (
+        '<html><body>'
+        '<img data-src="https://hk.66372188.xyz/2026/10/08/plain.jpg" '
+        'title="美图精选 (1/1)">'
+        '</body></html>'
+    )
+    tmp = tempfile.mkdtemp()
+
+    def get(url, headers=None, timeout=None, allow_redirects=None, **kw):
+        if url.startswith(cos_url):
+            return FakeResp(text=cos_html)
+        if url.startswith(plain_url):
+            return FakeResp(text=plain_html)
+        return FakeResp(content=JPEG)
+
+    try:
+        res = imgsnag.snag(cos_url, out_root=tmp, get=get, log=quiet,
+                           when=datetime(2026, 10, 5, 15, 55, 5))
+        check(res.ok, 'cosmeitu 流程跑通')
+        check(res.author == '洛城雪Yuki', f'署名取到了（得到 {res.author!r}）')
+        check(res.credit == '图片来源：洛城雪Yuki（cosmeitu.com）',
+              f'来源按「作者（站点）」拼（得到 {res.credit!r}）')
+
+        note = os.path.join(res.folder, imgsnag.CREDIT_FILE)
+        check(os.path.exists(note), '批次目录里落了「来源说明.txt」')
+        with open(note, encoding='utf-8') as f:
+            body = f.read()
+        check(res.credit in body, '说明文件里有来源那一行')
+        check('版权' in body and '原作者' in body, '说明文件里有版权提醒')
+        # 它是个 .txt，不该被当成图片（图库浏览只认图片扩展名）
+        check(imgsnag.CREDIT_FILE.endswith('.txt'), '说明文件是 .txt')
+
+        # 认不出署名：如实写站点名，不编
+        res2 = imgsnag.snag(plain_url, out_root=tmp, get=get, log=quiet,
+                            when=datetime(2026, 10, 5, 15, 55, 6))
+        check(res2.author == '', '没有 Coser 行时署名为空')
+        check(res2.credit == '来源：cosmeitu.com',
+              f'认不出署名时如实写站点名（得到 {res2.credit!r}）')
+
+        # 没有目录 / 没有来源时不写文件，也不抛
+        check(imgsnag.write_credit_file('', res.credit) is False,
+              '没有目录时 write_credit_file 返回 False，不抛异常')
+        check(imgsnag.write_credit_file(tmp, '') is False,
+              '没有来源文案时同样不写')
+
+        # 命令行那次也要把来源报出来 —— 手机上就靠这段文字
+        old_make = imgsnag.make_get
+        imgsnag.make_get = lambda insecure=False: get
+        try:
+            with redirect_stdout(io.StringIO()) as buf:
+                rc = imgsnag.main([cos_url, '--out', tmp])
+            out = buf.getvalue()
+        finally:
+            imgsnag.make_get = old_make
+        check(rc == 0, f'命令行跑通（得到 {rc}）')
+        check('图片来源：洛城雪Yuki' in out, f'命令行里报出了来源：{out[-160:]!r}')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_make_get_verify():
     print('[16] --insecure 开关')
     plain = imgsnag.make_get(False)
@@ -497,7 +612,8 @@ def main():
                test_unique_path, test_human_size, test_dedup, test_full_flow,
                test_quality_fallback, test_dedup_in_flow, test_skipped_and_empty,
                test_reject_unknown_site, test_dry_run, test_html_source,
-               test_headers, test_make_get_verify, test_cli,
+               test_headers, test_download_referer, test_credit_file,
+               test_make_get_verify, test_cli,
                test_image_source_with_clipboard]:
         fn()
 

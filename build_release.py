@@ -1,8 +1,8 @@
-"""ImgSnag 微信公众号版 一键发版脚本
+"""ImgSnag 一键发版脚本
 用法:  .venv/Scripts/python.exe build_release.py [--skip-build]
 流程:  校验版本号 -> 同步 .iss 版本号 -> PyInstaller onedir -> Inno Setup 安装包 -> 便携 zip
-产物:  installer/ImgSnagWeChat_<版号>_setup.exe
-       dist/ImgSnagWeChat_<版号>_portable.zip
+产物:  installer/ImgSnag_<版号>_setup.exe
+       dist/ImgSnag_<版号>_portable.zip
 
 升版本号：改 version.py 里的 VERSION（唯一手写处），本脚本会自动同步到 .iss。
 """
@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
-APP = "ImgSnagWeChat"
+APP = "ImgSnag"
 SPEC = f"{APP}.spec"
 ISS = f"{APP}.iss"
 
@@ -87,11 +87,11 @@ def main():
     sys.path.insert(0, ROOT)
     from version import VERSION  # noqa: E402
     ver = VERSION
-    print(f"ImgSnag 微信公众号版 v{ver}")
+    print(f"ImgSnag v{ver}")
     version_gate(ver)
 
     # 1) 同步 .iss 的 AppVersion（防两处不同步）
-    step("同步 ImgSnagWeChat.iss 版本号")
+    step("同步 ImgSnag.iss 版本号")
     path = os.path.join(ROOT, ISS)
     text = open(path, encoding="utf-8").read()
     new = re.sub(r'#define MyAppVersion "[^"]*"', f'#define MyAppVersion "{ver}"', text)
@@ -139,12 +139,12 @@ def main():
     print(f"  免安装目录  {src}")
     print("\n分发说明:")
     print("  · 安装包：双击下一步到底，自动建开始菜单和桌面快捷方式")
-    print("  · 便携包：解压即用，双击 ImgSnagWeChat.exe 直接跑，零联网")
+    print("  · 便携包：解压即用，双击 ImgSnag.exe 直接跑，零联网")
     print("  · 用户数据（历史库/屏蔽尺寸）在用户目录，卸载不删、升级不丢")
 
-    print("\n发版说明（一份内容两处使用）:")
-    print("  · README「更新日志」的当前版本段 = GitHub Release 正文，逐字相同")
-    print("  · 格式见 RELEASE_NOTES_TEMPLATE.md；写完跑下面这条校验两处一致：")
+    print("\n发版说明（只写 CHANGELOG.md，不另存草稿）:")
+    print("  · 把 CHANGELOG.md 里当前版本那一段整段复制成 GitHub Release 正文")
+    print("  · 格式见 RELEASE_NOTES_TEMPLATE.md；写完跑下面这条确认段落就绪：")
     print("      python tools/check_release_notes.py")
 
 

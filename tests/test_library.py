@@ -170,7 +170,7 @@ def test_scan_cap():
 
 def test_title_from_folder():
     print('\n[L-6] 文件夹名 → 文章标题')
-    eq(title_from_folder(r'C:\图片\ImgSnagWeChat\2026-09-18_164633_秋天的第一杯奶茶'),
+    eq(title_from_folder(r'C:\图片\ImgSnag\2026-09-18_164633_秋天的第一杯奶茶'),
        '秋天的第一杯奶茶', '剥掉日期_时分秒_前缀')
     eq(title_from_folder(r'C:\x\2026-09-18_164633_标题'), '标题', 'Windows 路径分隔符')
     eq(title_from_folder('2026-09-18_164633_标题'), '标题', '纯文件夹名（无父目录）')
@@ -179,7 +179,7 @@ def test_title_from_folder():
        '没有前缀就原样返回')
     eq(title_from_folder(r'C:\x\2026-09-18_164633'), '2026-09-18_164633',
        '只有前缀没有标题时，宁可返回前缀也不返回空串')
-    eq(title_from_folder('C:\\图片\\ImgSnagWeChat\\旧图库\\'), '旧图库', '结尾斜杠不影响')
+    eq(title_from_folder('C:\\图片\\ImgSnag\\旧图库\\'), '旧图库', '结尾斜杠不影响')
     eq(title_from_folder('http://x/2026-09-18_164633_标题'), '标题',
        '带 http 前缀也认得（历史里可能是 url 风格路径）')
     eq(title_from_folder(''), '', '空串不炸')

@@ -121,6 +121,18 @@ def eq(got, want, label):
     check(got == want, f'{label}\n      得到: {got}\n      期望: {want}')
 
 
+def saved_images(folder):
+    """批次目录里「用户看到的图」，按名字排序。
+
+    落盘目录里还有一份「来源说明.txt」—— 那是 v1.12.0 起有意放进去的版权提示，
+    不是图片，浏览图库时也不会显示（library.scan_batch 只认图片扩展名）。
+    这里用同样的口径过滤：下面这些用例断言的是「哪几张图落盘了」，
+    而不是「目录里一共有几个文件」。
+    """
+    return sorted(n for n in os.listdir(folder)
+                  if n.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')))
+
+
 def png_bytes(w, h, color=0xFF3366FF):
     img = QImage(w, h, QImage.Format_RGB32)
     img.fill(color)
@@ -303,7 +315,29 @@ def test_download_through_gui(app):
         check((subs[0] if subs else '').endswith('秋天的第一杯奶茶'),
               '文章标题进了文件夹名，一眼看出是哪一篇')
 
-        got = sorted(os.listdir(sub))
+        got = saved_images(sub)
+        # 顺便钉住 v1.12.0 新增的那份来源说明：它**应该**在那儿，但不算图
+        note = os.path.join(sub, '来源说明.txt')
+        check(os.path.exists(note), '批次目录里落了「来源说明.txt」')
+        if os.path.exists(note):
+            with open(note, encoding="utf-8") as f:
+                body = f.read()
+            check('来源' in body, f'说明里标出了来源（{body[:26]!r}）')
+            check('版权' in body, '说明里写着版权提醒')
+
+        # 界面上那行来源与版权提示：用户在下载之前就该看到自己抓的是哪儿的东西。
+        # 这里补走一次**真实的收尾入口**（来源提示就是在它开头刷出来的）——
+        # _on_image_loaded 只往缩略图条里塞卡片，self.images 要到收尾才成形。
+        # 「解析收尾一定会刷新它」另有一条在 UI-27 里钉着。
+        # 判据用 isHidden 而不是 isVisible —— 离屏下主窗口没有 show()，整条可见性
+        # 链恒为 False，拿 isVisible 来断言就成了一条永远红的假断言。
+        win._on_all_done([it.info for it in win.thumb_items])
+        QApplication.processEvents()
+        check(not win.credit_label.isHidden(), '界面上显示了来源与版权提示')
+        ctext = win.credit_label.text()
+        check('来源' in ctext, f'提示里写了来源（{ctext[:24]!r}）')
+        check('版权' in ctext, '提示里带版权提醒')
+
         eq(got, ['img_01.png', 'img_02.png', 'img_03.png'], '三张图按序号落进子文件夹')
         for name in got:
             size = os.path.getsize(os.path.join(sub, name))
@@ -321,7 +355,7 @@ class _isolated_config:
     """把用户配置临时改到临时目录。
 
     blocked_config 与 QSettings 都是模块级单例，测试如果直接用，会**读写用户真实的**
-    %APPDATA%/ImgSnagWeChat/blocked_sizes.json 和注册表 —— 跑一遍测试就把用户攒下的
+    %APPDATA%/ImgSnag/blocked_sizes.json 和注册表 —— 跑一遍测试就把用户攒下的
     屏蔽规则清掉、把窗口尺寸改掉，是最难察觉的那种副作用。这里用临时文件顶替，
     退出时原样切回去（config_path 是实例属性，所以 app/worker 里引用的那个单例
     也会跟着走临时文件）。
@@ -1265,7 +1299,7 @@ def test_about_and_update(app):
         check(win.version_label.text() in joined_labels,
               '对话框里带版本号（报 bug 时用户能直接念出来）')
         html = seen.get('html', '')
-        check('virmuran/ImgSnag-WeChat' in html, '给出源码地址')
+        check('virmuran/ImgSnag' in html, '给出源码地址')
         check('history.db' in html, '写明下载历史存在哪（用户要找回自己的文件）')
         check('PySide6' in html, '列明第三方依赖')
         check('不收集任何信息' in html, '写清隐私态度')
@@ -1309,9 +1343,9 @@ def test_about_and_update(app):
             notes='## v1.6.0\n- 新增关于与检查更新',
             page_url='https://example.com/release',
             assets=[
-                U.AssetInfo('ImgSnagWeChat_1.6.0_setup.exe', 'installer',
+                U.AssetInfo('ImgSnag_1.6.0_setup.exe', 'installer',
                             30_500_000, 'https://example.com/a.exe', '1.6.0'),
-                U.AssetInfo('ImgSnagWeChat_1.6.0_portable.zip', 'portable',
+                U.AssetInfo('ImgSnag_1.6.0_portable.zip', 'portable',
                             31_800_000, 'https://example.com/b.zip', '1.6.0'),
             ],
         )
@@ -1470,7 +1504,7 @@ def test_auto_library_folder(app):
             check(bool(re.match(r'^\d{4}-\d{2}-\d{2}_\d{6}_', name)),
                   f'名字以「日期_时分秒_」开头（实测 {name}）')
             check(name.endswith('秋天的第一杯奶茶'), '文章标题进了文件夹名')
-            eq(sorted(os.listdir(os.path.join(lib, name))), ['img_01.png', 'img_02.png'],
+            eq(saved_images(os.path.join(lib, name)), ['img_01.png', 'img_02.png'],
                '两张图落进这个子文件夹')
             eq(win._last_save_folder, os.path.join(lib, name), '记住了最近落盘的目录')
             win.close()
@@ -1490,7 +1524,7 @@ def test_auto_library_folder(app):
             run(win2)
             fallback_dirs = [n for n in os.listdir(lib) if '微信图片' in n]
             eq(len(fallback_dirs), 1, '取不到标题时文件夹名用兜底「微信图片」')
-            eq(sorted(os.listdir(os.path.join(lib, fallback_dirs[0]))), ['img_01.png'],
+            eq(saved_images(os.path.join(lib, fallback_dirs[0])), ['img_01.png'],
                '兜底命名的那批也正常落盘')
             win2.close()
             QApplication.processEvents()
@@ -1523,7 +1557,7 @@ def test_auto_library_folder(app):
                       '同名时另起 _2，不覆盖上一次')
                 eq(os.listdir(os.path.join(lib, '固定名')), [],
                    '原来那个同名目录内容没被碰过')
-                eq(sorted(os.listdir(os.path.join(lib, '固定名_2'))), ['img_01.png'],
+                eq(saved_images(os.path.join(lib, '固定名_2')), ['img_01.png'],
                    '新的一批落进 _2')
                 win3.close()
                 QApplication.processEvents()
@@ -1544,7 +1578,7 @@ def test_auto_library_folder(app):
             eq(len(subs4), 1, '「另存」也在其中建了一个子文件夹')
             check(bool(subs4) and subs4[0].endswith('另存的标题'),
                   '「另存」同样按 日期_时分秒_标题 命名')
-            eq(sorted(os.listdir(os.path.join(elsewhere, subs4[0]))), ['img_01.png'],
+            eq(saved_images(os.path.join(elsewhere, subs4[0])), ['img_01.png'],
                '图落进另存位置的那个子文件夹')
 
             # ---- (e) 打开图库 ----
@@ -1567,7 +1601,7 @@ def test_auto_library_folder(app):
             QApplication.processEvents()
             add_images(win5, 1)
             run(win5)
-            eq(sorted(os.listdir(manual)), ['img_01.png'],
+            eq(saved_images(manual), ['img_01.png'],
                '图库不可用时回退到手动选择的目录（不让这次下载白费）')
             win5.close()
             QApplication.processEvents()
@@ -1832,6 +1866,12 @@ def test_browse_history_batch(app):
                   '「查看」的 tooltip 说清是在软件里看')
 
             # ---- (b) 走真实点击：真的读回磁盘上的图 ----
+            # 先造出「上一篇刚解析完」的样子 —— 来源提示正挂着上一篇的署名。
+            # 接着点「查看」进浏览态，这一行必须消失；否则用户看到的是
+            # 「在翻本地图库，却挂着上一篇的出处」这种假信息。
+            # （不先造这个状态，这条断言就测不到任何东西：初始本来就是隐藏的。）
+            win.credit_label.setText('上一篇的来源')
+            win.credit_label.setVisible(True)
             view.click()
             QApplication.processEvents()
             eq(win.stack.currentIndex(), 0, '点「查看」切到解析页')
@@ -1848,6 +1888,9 @@ def test_browse_history_batch(app):
                '标题从文件夹名剥掉日期得到（供「另存」命名）')
             check('历史图库' in win.info_label.text(),
                   f'信息栏说明这是历史图库（实测 {win.info_label.text()!r}）')
+            check(win.credit_label.isHidden(),
+                  '浏览本地图库时不硬套一个来源 —— 那是「某个文件夹里的图」，'
+                  '把上一个站点的署名安上去等于给了假出处')
             msg = win.status.currentMessage()
             check('不会重复下载' in msg, f'状态栏说明不会重复下载（实测 {msg!r}）')
             check('1 个文件读不出' in msg, f'坏文件被计数并说明（实测 {msg!r}）')
@@ -1941,7 +1984,13 @@ def test_reparse_keeps_download(app):
         try:
             # 模拟「重新解析同一链接」走到解析完成落账这一步
             win._last_parsed_url = url
+            # 先塞一个脏值再收尾：_on_all_done 里必须刷过一次来源提示，否则界面会
+            # 留着上一篇的署名（用户看到的是「换了一篇，署名还是老的」这种假信息）。
+            win.credit_label.setText('上一篇的旧署名')
+            win.credit_label.setVisible(True)
             win._on_all_done([])
+            check(win.credit_label.isHidden(),
+                  '解析收尾会刷新来源提示（本次是空结果 → 藏起来，不留上一篇的旧署名）')
 
             rows = hm.get_all()
             eq(len(rows), 1, '还是只有一行（不会冒出一条「已解析、0 下载」）')
@@ -2085,9 +2134,9 @@ def test_update_wizard(app):
         notes='## v1.11.0\n- 应用内更新',
         page_url='https://example.com/release',
         assets=[
-            U.AssetInfo('ImgSnagWeChat_1.11.0_setup.exe', 'installer', 100,
+            U.AssetInfo('ImgSnag_1.11.0_setup.exe', 'installer', 100,
                         'https://example.com/a.exe', '1.11.0'),
-            U.AssetInfo('ImgSnagWeChat_1.11.0_portable.zip', 'portable', 100,
+            U.AssetInfo('ImgSnag_1.11.0_portable.zip', 'portable', 100,
                         'https://example.com/b.zip', '1.11.0'),
         ],
     )
@@ -2186,8 +2235,8 @@ def test_update_wizard(app):
             src_dir = tempfile.mkdtemp(prefix='imgsnag_zipsrc_')
             src_zip = os.path.join(src_dir, 'portable_src.zip')
             with zipfile.ZipFile(src_zip, 'w') as z:
-                z.writestr('ImgSnagWeChat/ImgSnagWeChat.exe', b'MZ')
-                z.writestr('ImgSnagWeChat/_internal/keep.txt', b'x')
+                z.writestr('ImgSnag/ImgSnag.exe', b'MZ')
+                z.writestr('ImgSnag/_internal/keep.txt', b'x')
 
             def fake_portable(url, dest, **kw):
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -2211,7 +2260,7 @@ def test_update_wizard(app):
             eq(os.path.dirname(os.path.abspath(port_dir)),
                os.path.dirname(os.path.abspath(update_dl.app_dir())),
                '解压到程序目录旁边（丢在下载目录里用户找不到给自己换）')
-            check(os.path.exists(os.path.join(port_dir, 'ImgSnagWeChat', 'ImgSnagWeChat.exe')),
+            check(os.path.exists(os.path.join(port_dir, 'ImgSnag', 'ImgSnag.exe')),
                   '新版主程序真的解压出来了')
             eq(wiz2.button(QWizard.FinishButton).text(), '打开新版文件夹',
                '便携版的收尾按钮是「打开新版文件夹」（不替用户换掉正在用的那份）')

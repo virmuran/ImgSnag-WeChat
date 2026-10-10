@@ -1,11 +1,11 @@
-; ImgSnag 微信公众号版 — Inno Setup 安装包脚本
-; 编译：ISCC.exe ImgSnagWeChat.iss
+; ImgSnag — Inno Setup 安装包脚本
+; 编译：ISCC.exe ImgSnag.iss
 ; 发新版时改 AppVersion（build_release.py 会自动同步，勿手改）
 
-#define MyAppName "ImgSnag 微信公众号版"
+#define MyAppName "ImgSnag"
 #define MyAppVersion "1.11.2"
 #define MyAppPublisher "ImgSnag"
-#define MyAppURL "https://github.com/virmuran"
+#define MyAppURL "https://github.com/virmuran/ImgSnag"
 
 [Setup]
 ; 固定 AppId：保证升级/卸载识别同一程序，勿改动
@@ -14,13 +14,13 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
-DefaultDirName={autopf}\ImgSnagWeChat
+DefaultDirName={autopf}\ImgSnag
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 OutputDir=installer
-OutputBaseFilename=ImgSnagWeChat_{#MyAppVersion}_setup
+OutputBaseFilename=ImgSnag_{#MyAppVersion}_setup
 SetupIconFile=ImgSnag.ico
-UninstallDisplayIcon={app}\ImgSnagWeChat.exe
+UninstallDisplayIcon={app}\ImgSnag.exe
 ; LZMA2 极限压缩 + 固实包：Qt DLL 压缩率约 50~60%
 Compression=lzma2/max
 SolidCompression=yes
@@ -36,14 +36,14 @@ Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescripti
 Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Files]
-Source: "dist\ImgSnagWeChat\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs
+Source: "dist\ImgSnag\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\ImgSnagWeChat.exe"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\ImgSnagWeChat.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\ImgSnag.exe"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\ImgSnag.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\ImgSnagWeChat.exe"; Description: "立即运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\ImgSnag.exe"; Description: "立即运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; 注意：用户数据在 %USERPROFILE%\.imgsnag_wechat 与 %APPDATA%\ImgSnagWeChat，卸载时一律不删
+; 注意：用户数据在 %USERPROFILE%\.imgsnag 与 %APPDATA%\ImgSnag，卸载时一律不删

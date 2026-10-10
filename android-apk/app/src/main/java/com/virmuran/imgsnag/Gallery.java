@@ -44,7 +44,7 @@ public final class Gallery {
 
     /** 相册里的相册名（Pictures 下的子目录）。
      *  ⚠ Python 侧（imgsnag_web.ALBUM_SUBDIR）必须与此一致，测试盯着。 */
-    public static final String ALBUM = "ImgSnagWeChat";
+    public static final String ALBUM = "ImgSnag";
 
     private Gallery() {
     }

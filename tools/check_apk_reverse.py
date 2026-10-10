@@ -69,7 +69,7 @@ CASES = [
      'mod.callAttr("snag_text", raw, workRoot.getAbsolutePath())',
      '[12] 传给 snag_text 的必须是 filesDir 根'),
     ('Java 侧改相册目录名', GAL_JAVA,
-     'ALBUM = "ImgSnagWeChat"', 'ALBUM = "OtherAlbum"',
+     'ALBUM = "ImgSnag"', 'ALBUM = "OtherAlbum"',
      '[12] 手机相册目录名'),
     ('把 polish 改成空操作', BRIDGE,
      '    return message.replace(CLI_CERT_HINT, PHONE_CERT_HINT)',
@@ -90,7 +90,7 @@ CASES = [
      'abiFilters += listOf("arm64-v8a", "x86_64")',
      '[13] 只带 arm64-v8a'),
     ('说明文档里删掉相册路径', APK_README,
-     '手机存储 / Pictures / ImgSnagWeChat', '手机存储 / 某处',
+     '手机存储 / Pictures / ImgSnag', '手机存储 / 某处',
      '[16] 写清了相册路径'),
     ('副本漂移（改了同步过来的文件）', SYNCED,
      'MAX_TITLE_LEN = 24', 'MAX_TITLE_LEN = 25',
@@ -326,6 +326,33 @@ CASES = [
      'cm.setPrimaryClip(ClipData.newPlainText("标题", text));',
      '// 忘了真写',
      '[10] 真的写进了系统剪贴板', TEST_WEB),
+
+    # ── 来源提示与 Referer（2026-10-10 安卓端适配）─────────────────────
+    # ⚠ cosmeitu 的 ciyuandao 图床是「带 Referer 就 403」。手机端有**两条**
+    #   下载路径（共用主流程 imgsnag.py 与网页层的 imgsnag_web.py）——
+    #   只修一条，另一条照样整批下不来，而且表现一模一样：一张都没有。
+    ('网页层又把页面地址当 Referer（手机上抓 cosmeitu 整批 403）', WEB_PY,
+     '                self._headers = imgsnag.build_headers(\n'
+     '                    adapter.download_referer(source))\n',
+     '                self._headers = imgsnag.build_headers(source)\n',
+     '[15] cosmeitu 下载**不带** Referer', TEST_WEB),
+
+    ('从历史打开时 Referer 硬用页面地址（重开一次就整批 403）', WEB_PY,
+     "                    ad.download_referer(self.source) if ad else '')",
+     '                    self.source)',
+     '[15] 从历史重开再下载**仍然**不带', TEST_WEB),
+
+    ('状态里不带来源（界面拿不到这一行）', WEB_PY,
+     "                'credit': build_credit(self.author, self.site),\n",
+     '',
+     '[15] 状态里带来源提示', TEST_WEB),
+
+    # ⚠ 页面里 `s.credit` 出现**两处**（判断 + 赋值）—— 只换第一处的话，
+    #   另一处还在，`'s.credit' in page` 照样命中，拆坏等于没拆（报"断言是假的"，
+    #   其实是拆得不到位，两件事得分清楚）。所以这里用 -1 = 全部替换。
+    ('网页拿到来源却不显示（白解析一遍）', WEBUI,
+     's.credit', '0',
+     '[9] 页面用到了状态里的来源字段', TEST_WEB, -1),
 ]
 
 #: 老用例不写"跑哪个测试文件"就默认跑 test_apk_app.py —— 免得为了加个字段

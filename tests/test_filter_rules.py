@@ -6,7 +6,7 @@
 
 为什么单独一个文件：这是 v1.5.0 补上的「双向门」。旧版只有 add_blocked 一个入口 ——
 在缩略图上右键误屏蔽一个尺寸，那类图从此静默消失，既看不到屏蔽了哪些尺寸、也没有
-任何撤销入口，只能去手改 %APPDATA%/ImgSnagWeChat/blocked_sizes.json。这里钉住的是
+任何撤销入口，只能去手改 %APPDATA%/ImgSnag/blocked_sizes.json。这里钉住的是
 「屏蔽表是可逆的、可读的、写不坏的」，具体锚点：
 
 一、判定规则只此一份（classify）

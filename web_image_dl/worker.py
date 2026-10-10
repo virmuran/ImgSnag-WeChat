@@ -80,6 +80,11 @@ class FetchWorker(QThread):
         #: 不用信号回传是为了不改 all_done 的签名（改了会连带改动别处）；
         #: 界面在 all_done 之后才读，那时 run() 早已写完，不存在竞态。
         self.article_title = ""
+        #: 来源署名（公众号名 / coser 名），给界面上的版权提示用。
+        #: 与 article_title 同属"解析时写、all_done 之后读"的模式，同样不动信号签名。
+        #: 取不到就是空串 —— 那是**正常路径**（有些篇目确实没有署名），
+        #: 界面会退化成「来源：<站点名>」+ 通用版权提醒。
+        self.article_author = ""
 
     def cancel(self):
         """请求取消。最坏情况要等当前这张图的请求超时（20s）后才会退出循环。"""
@@ -113,6 +118,27 @@ class FetchWorker(QThread):
                 print(f"  retry next candidate: {u[:70]}... : {e}")
         return None, None
 
+    @staticmethod
+    def _download_headers(adapter, page_url, is_url):
+        """下载图片时用的请求头。
+
+        唯一有讲究的是 Referer，而**带不带由站点自己说了算**
+        （SiteAdapter.download_referer）。默认沿用页面地址 —— 有些图床会校验
+        来源页；但 cosmeitu 的 ciyuandao 是阿里云 OSS，防盗链被配成了
+        「有 Referer 就拒」，带上反而整批 403，那个站点返回空串。
+
+        单独抽出来是为了能被测试直接钉住 —— 埋在 run() 里就只能靠跑整个线程
+        来间接验证，太笨重。
+        """
+        h = dict(HEADERS)
+        if is_url:
+            referer = adapter.download_referer(page_url) if adapter else ''
+            if referer:
+                h['Referer'] = referer
+            else:
+                h.pop('Referer', None)   # HEADERS 目前没有它，留着是防将来有人加进来
+        return h
+
     def run(self):
         try:
             if self.is_url:
@@ -128,8 +154,9 @@ class FetchWorker(QThread):
                 self.error.emit("没有可用的站点适配器，无法解析该内容。")
                 return
 
-            # 标题先取出来：后面无论从哪条路径返回，界面都能拿到它给文件夹命名
+            # 标题与来源署名先取出来：后面无论从哪条路径返回，界面都能拿到它们
             self.article_title = adapter.extract_title(html)
+            self.article_author = adapter.extract_author(html)
 
             urls = []
             if not self._cancelled:
@@ -145,9 +172,7 @@ class FetchWorker(QThread):
                 )
                 return
 
-            dl_headers = dict(HEADERS)
-            if self.is_url:
-                dl_headers['Referer'] = self.source
+            dl_headers = self._download_headers(self.adapter, self.source, self.is_url)
 
             images = []
             # 从配置加载屏蔽尺寸（支持热更新：右键屏蔽后下次解析立即生效）

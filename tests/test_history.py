@@ -10,7 +10,7 @@
   b) 没有下载记录（scanned/failed）→ 照旧整体覆盖；
   c) 同一 URL 始终只有一行（返回的 id 不变），下载回调 update 那行还能找到。
 
-  全部用临时目录的独立 db，绝不读写用户的 ~/.imgsnag_wechat/history.db。
+  全部用临时目录的独立 db，绝不读写用户的 ~/.imgsnag/history.db。
 """
 import os
 import sys

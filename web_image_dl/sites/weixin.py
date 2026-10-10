@@ -52,6 +52,27 @@ _MMBIZ_RE = re.compile(
 #: 不去匹配会随模板调整的 HTML 结构。
 _SNIFF_MARKS = ('mmbiz.qpic.cn', 'mp.weixin.qq.com', 'picture_page_info_list', 'msg_title')
 
+#: 公众号名称的来源，按可靠性排序：(正则, 取值分组序号)。
+#:
+#: ⚠ **这几个字段名来自不同年代的模板，手上没有真实文章样本逐一验证过**。
+#: 所以刻意写成"多来源依次尝试 + 全都认不出就返回空串"的容错形式：
+#: 最坏情况只是退化成界面显示「来源：微信公众号」+ 通用版权提醒，
+#: **不会出错，更不会编一个假名字**。将来拿真实文章一测就知道哪个字段还有效，
+#: 有效的往前面挪、失效的删掉即可。
+_AUTHOR_SOURCES = (
+    # var nickname = "公众号名"（正文页 JS 变量，最接近界面显示的名字）
+    (re.compile(r"""nickname\s*=\s*(['"])((?:\\.|(?!\1).)*)\1""", re.S), 2),
+    # <a id="js_name">公众号名</a> / <span id="js_name">…</span>
+    (re.compile(r'id=["\']js_name["\'][^>]*>(.*?)<', re.I | re.S), 1),
+    # <strong class="profile_nickname">…</strong>（更早的模板）
+    (re.compile(r'class=["\'][^"\']*profile_nickname[^"\']*["\'][^>]*>(.*?)<', re.I | re.S), 1),
+    # <meta property="og:article:author" content="…">（属性顺序不固定，两个方向都试）
+    (re.compile(r'<meta[^>]+property=["\']og:article:author["\'][^>]*?content=["\'](.*?)["\']',
+                re.I | re.S), 1),
+    (re.compile(r'<meta[^>]+content=["\'](.*?)["\'][^>]*?property=["\']og:article:author["\']',
+                re.I | re.S), 1),
+)
+
 #: 图片地址**路径段**里的格式标记（`mmbiz_png` / `sz_mmbiz_gif` / `mmbiz_webp` …）。
 #:
 #: 为什么非得单独判它：把地址提升成 `/0` 原图档时，查询串会被一并剥掉
@@ -159,6 +180,31 @@ def extract_title(html) -> str:
         for m in pat.finditer(html):
             text = _decode_title_text(m.group(group))
             if text:
+                return text
+    return ''
+
+
+def extract_author(html) -> str:
+    """从文章 HTML 里取**公众号名称**，给界面的版权提示用。
+
+    依次尝试 `var nickname` → `#js_name` → `profile_nickname` → og:article:author，
+    取到第一个非空即返回；都取不到返回空串（界面退化成「来源：微信公众号」）。
+
+    ⚠ 这几个字段名来自不同年代的模板，**手上没有真实文章样本逐一验证过**，
+    所以刻意做成「多来源 + 认不出就返回空串」的容错形式：最坏情况只是界面少写一个
+    具体名字 —— **不会出错，更不会编一个假署名出来**。拿到真实文章后，
+    把还有效的往前面挪、失效的删掉即可。
+
+    只扫前 200KB：昵称必然出现在页面头部（`<script>` 顶部那批变量里），
+    而微信正文页动辄几百 KB，全文跑多个正则纯属浪费。
+    """
+    if not html:
+        return ''
+    head = html[:200000]
+    for pat, group in _AUTHOR_SOURCES:
+        for m in pat.finditer(head):
+            text = _decode_title_text(m.group(group))
+            if text and len(text) <= 60:      # 过长的一律视为误抓
                 return text
     return ''
 
@@ -402,6 +448,9 @@ class WeixinAdapter(SiteAdapter):
 
     def extract_title(self, html: str) -> str:
         return extract_title(html)
+
+    def extract_author(self, html: str) -> str:
+        return extract_author(html)
 
     def candidates(self, url: str) -> list:
         """原图档在前，压缩档兜底。

@@ -1,6 +1,6 @@
 """
 下载历史管理器 — SQLite持久化，记录每次解析下载的结果
-数据库位置：~/.imgsnag_wechat/history.db（可传 `db_path=` 换地方）
+数据库位置：~/.imgsnag/history.db（可传 `db_path=` 换地方）
 
 ⚠ 导入本模块**不该有任何副作用**：`history_manager` 那个全局单例改成
 用到时才建（见文件末尾的 `__getattr__`）。否则安卓端只是想用一下
@@ -13,7 +13,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 
-DB_DIR = os.path.expanduser("~/.imgsnag_wechat")
+DB_DIR = os.path.expanduser("~/.imgsnag")
 DB_PATH = os.path.join(DB_DIR, "history.db")
 
 

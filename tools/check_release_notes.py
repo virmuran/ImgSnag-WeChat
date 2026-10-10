@@ -1,19 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""发版说明一致性闸门 —— 校验 README 的当前版本段与发布说明逐字一致
+"""发版说明闸门 —— 校验 `CHANGELOG.md` 的当前版本段是否就绪
 
-一份内容、两处使用：README「更新日志」的当前版本段就是 GitHub Release 正文。
-手写两份迟早写飘（改了一处忘了另一处，或者干脆各写各的），本脚本把
-「逐字一致」变成可执行检查。
+v1.12.0 起**更新说明只写一处**：`CHANGELOG.md` 里当前版本的段落。
+发版时直接把这一段复制成 GitHub Release 正文即可，不再另存 `RELEASE_NOTES_v*.md`
+（那份草稿曾经是第二个落地点，改一处忘一处就会两处不一致）。
+
+因此本脚本现在读两个文件、只做三件事：
+    1. `CHANGELOG.md` 结构完整（有「更新日志」标题、有当前版本段）
+    2. `README.md` 顶部的版本徽章与 `version.py` 一致
+    3. `README.md` 里留着一个指向 `CHANGELOG.md` 的入口（读者唯一的路）
 
 在项目根目录运行：
     python tools/check_release_notes.py
 
 退出码：
-    0  通过（含历史版本软跳过）
-    1  当前版本两处不一致，或 README 结构缺失、顶部版本徽章与 version.py 不符
+    0  通过
+    1  版本段缺失、版本徽章与 version.py 不符、README 没有入口
 """
-import difflib
 import io
 import os
 import re
@@ -27,26 +31,21 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-#: 兜底用的版本号阈值：自本版起「README 段 = 发布说明正文」逐字同文。
-#: 实际判据是「段内含 NEW_FORMAT_HEADS 任一标题」**或**「版本号 ≥ 本阈值」——
-#: 所以即便忘了同步这个常量，只要说明照新格式写就仍会自动纳入硬校验。
-FORMAT_SINCE = (1, 10, 0)
-
+CHANGELOG_NAME = "CHANGELOG.md"
+README_NAME = "README.md"
 NOTES_TEMPLATE = "RELEASE_NOTES_TEMPLATE.md"
-LOG_HEADING = re.compile(r"^##\s*更新日志\s*$", re.M)
+
+#: 更新日志的标题（CHANGELOG.md 用一级 `#`，兼容历史写法里的二级 `##`）
+LOG_HEADING = re.compile(r"^#{1,2}\s*更新日志\s*$", re.M)
 #: 版本段标题：`### v1.2.3`
 VERSION_HEADING = re.compile(r"^### v\d+\.\d+\.\d+\b", re.M)
-#: 新格式骨架里的小标题：出现任一即认为该版说明已按规范撰写
+#: 规范骨架里的小标题：出现任一即认为该版说明已按规范撰写
 NEW_FORMAT_HEADS = ("**新增**", "**改进**", "**修复**", "**移除**", "**兼容性提示**")
 
 
 def read(path):
     with io.open(path, encoding="utf-8", newline="") as fp:
         return fp.read()
-
-
-def ver_tuple(ver):
-    return tuple(int(x) for x in ver.split("."))
 
 
 def read_version():
@@ -59,14 +58,13 @@ def read_version():
 
 
 def extract_section(text, ver):
-    """取出 README「更新日志」里 `### vX.Y.Z` 那一段
+    """取出更新日志里 `### vX.Y.Z` 那一段
 
     边界以**下一个版本段标题**为准，而不是泛泛的 `## ` / `### ` —— 版本段内部
-    可能自带 `## ` 级小标题（历史格式常见），按泛化标题截断会**静默截短**，
-    两边都截短后反而被判成「一致」（假通过，最危险的一种错）。
+    可能自带 `## ` 级小标题（历史格式常见），按泛化标题截断会**静默截短**。
     若当前版本是最后一段，则止于下一个顶级章节 `## ` 或文末。
 
-    只在「## 更新日志」标题之后搜索，避免误匹配正文别处的版本号示例。
+    只在「更新日志」标题之后搜索，避免误匹配正文别处的版本号示例。
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     head = LOG_HEADING.search(text)
@@ -86,82 +84,69 @@ def extract_section(text, ver):
     return scope[start:end]
 
 
-def norm(text):
-    """比对用归一化：换行统一、每行去尾部空白、整体去首尾空行"""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return "\n".join(ln.rstrip() for ln in text.strip().split("\n")).strip()
-
-
 def main():
     ver = read_version()
-    print(f"发版说明一致性检查 —— v{ver}")
+    print(f"发版说明检查 —— v{ver}")
     print(f"  版本来源 : version.py")
-    print(f"  更新日志 : README.md")
+    print(f"  更新说明 : {CHANGELOG_NAME}（当前版本段 = Release 正文，直接复制）")
+    print(f"  版本徽章 : {README_NAME}")
 
     ok = True
-    readme = read(os.path.join(ROOT, "README.md"))
+    changelog_path = os.path.join(ROOT, CHANGELOG_NAME)
+    readme_path = os.path.join(ROOT, README_NAME)
 
-    # 1) README 结构
-    if LOG_HEADING.search(readme.replace("\r\n", "\n")):
-        print("  ✓ README 含「## 更新日志」标题")
+    if not os.path.exists(changelog_path):
+        print(f"  ✗ 找不到 {CHANGELOG_NAME} —— 更新日志集中放在这个文件里")
+        return 1
+    changelog = read(changelog_path)
+    readme = read(readme_path) if os.path.exists(readme_path) else ""
+
+    # 1) CHANGELOG 结构
+    if LOG_HEADING.search(changelog.replace("\r\n", "\n")):
+        print(f"  ✓ {CHANGELOG_NAME} 含「更新日志」标题")
     else:
-        print("  ✗ README 找不到「## 更新日志」标题")
+        print(f"  ✗ {CHANGELOG_NAME} 找不到「更新日志」标题")
         ok = False
 
-    # 1b) 顶部版本徽章
+    # 1b) 版本徽章
     #     它没有任何代码引用，属于纯手工落地点 —— 实测已静默漂过两个版本
     #     （v1.8.2 的徽章一直挂到 v1.9.0 发布之后）。既然是人眼最常看到的地方，
     #     就必须由闸门钉住；判据只认 shields.io 的 `badge/version-<ver>-` 这一段。
     badge = re.search(r"badge/version-([0-9][0-9.]*)-", readme)
     if badge is None:
-        print("  ! README 顶部没有版本徽章 —— 跳过本项")
+        print(f"  ! {README_NAME} 顶部没有版本徽章 —— 跳过本项")
     elif badge.group(1) == ver:
-        print(f"  ✓ README 版本徽章 = v{ver}")
+        print(f"  ✓ {README_NAME} 版本徽章 = v{ver}")
     else:
-        print(f"  ✗ README 版本徽章是 v{badge.group(1)}，与 version.py 的 v{ver} 不一致")
+        print(f"  ✗ {README_NAME} 版本徽章是 v{badge.group(1)}，与 version.py 的 v{ver} 不一致")
+        ok = False
+
+    # 1c) README 必须留一个入口
+    #     更新日志搬走以后，README 里那条链接是读者唯一的路 —— 它没有别的东西
+    #     盯着（纯手工），所以同样纳入闸门。
+    if CHANGELOG_NAME in readme:
+        print(f"  ✓ {README_NAME} 有指向 {CHANGELOG_NAME} 的入口")
+    else:
+        print(f"  ✗ {README_NAME} 里没有指向 {CHANGELOG_NAME} 的链接 —— 读者会找不到更新日志")
         ok = False
 
     # 2) 当前版本段
-    seg = extract_section(readme, ver)
+    seg = extract_section(changelog, ver)
     if seg is None:
-        print(f"  ✗ README 更新日志里没有 v{ver} 段 —— 先补上再发版")
-        ok = False
-    else:
-        print(f"  ✓ README 含 v{ver} 段（{len(seg.strip().splitlines())} 行）")
+        print(f"  ✗ {CHANGELOG_NAME} 里没有 v{ver} 段 —— 先补上再发版")
+        return 1
 
-    # 3) 历史版本：软跳过
-    #    判据二选一 —— 段内含新格式小标题（写法已切换），或版本号已到规范生效版本
-    since = ".".join(str(x) for x in FORMAT_SINCE)
-    is_new_format = (any(h in (seg or "") for h in NEW_FORMAT_HEADS)
-                     or ver_tuple(ver) >= FORMAT_SINCE)
-    if not is_new_format:
-        print(f"  · v{ver} 仍是格式统一之前的写法 —— 跳过逐字比对")
-        print(f"    （自 v{since} 起，或说明里出现「**新增**」等小标题后，自动转为硬校验）")
-        return 0 if ok else 1
+    lines = [ln for ln in seg.strip().splitlines() if ln.strip()]
+    print(f"  ✓ {CHANGELOG_NAME} 含 v{ver} 段（{len(lines)} 行）")
 
-    # 4) 逐字比对
-    notes_name = f"RELEASE_NOTES_v{ver}.md"
-    notes_path = os.path.join(ROOT, notes_name)
-    if not os.path.exists(notes_path):
-        print(f"  ! 未找到 {notes_name} —— 按 {NOTES_TEMPLATE} 撰写后本项转为硬校验")
-        print("    （提示项，不计入失败）")
-        return 0 if ok else 1
+    # 2b) 骨架提示（不计入失败）：按规范撰写的说明至少带一个小标题
+    if not any(h in seg for h in NEW_FORMAT_HEADS):
+        print(f"  ! v{ver} 段里没有「**新增**」这类小标题 —— 骨架见 {NOTES_TEMPLATE}")
+    elif len(lines) < 3:
+        print(f"  ! v{ver} 段偏短（{len(lines)} 行）—— 确认是否漏写条目")
 
-    a, b = norm(seg or ""), norm(read(notes_path))
-    if a == b:
-        print(f"  ✓ README 段与 {notes_name} 逐字一致（{len(a)} 字符）")
-        return 0 if ok else 1
-
-    print(f"  ✗ README 段与 {notes_name} 不一致"
-          f"（README {len(a)} 字符 / 文件 {len(b)} 字符）")
-    diff = list(difflib.unified_diff(a.split("\n"), b.split("\n"),
-                                     "README", notes_name, lineterm="", n=1))
-    for ln in diff[:40]:
-        print("     " + ln[:118])
-    if len(diff) > 40:
-        print(f"     ...（共 {len(diff)} 行差异）")
-    print("\n  一份内容两处使用 —— 改完这一处，请把同一份内容粘到另一处。")
-    return 1
+    print("\n发布时把上面这一版在 CHANGELOG.md 里的段落整段复制为 Release 正文即可。")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

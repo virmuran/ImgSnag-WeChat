@@ -241,11 +241,11 @@ def main():
                '- 这一屏是「发现新版本」的样子，内容由「检查更新」从 GitHub 拉取\n'
                '- 静默检查发现新版只在侧边栏亮提示，不弹窗打扰\n'
                '- 想看更新内容时点侧边栏提示或「关于」里的检查更新\n'),
-        page_url='https://github.com/virmuran/ImgSnag-WeChat/releases/latest',
+        page_url='https://github.com/virmuran/ImgSnag/releases/latest',
         assets=[
-            U.AssetInfo(f'ImgSnagWeChat_{demo_latest}_setup.exe', 'installer', 30_500_000,
+            U.AssetInfo(f'ImgSnag_{demo_latest}_setup.exe', 'installer', 30_500_000,
                         'https://example.com/a.exe', demo_latest),
-            U.AssetInfo(f'ImgSnagWeChat_{demo_latest}_portable.zip', 'portable', 31_800_000,
+            U.AssetInfo(f'ImgSnag_{demo_latest}_portable.zip', 'portable', 31_800_000,
                         'https://example.com/b.zip', demo_latest),
         ],
     )
@@ -257,7 +257,7 @@ def main():
 
     # ---- 11. 下载完成：告诉用户图存进了哪个专属文件夹（v1.7.0） ----
     demo_folder = os.path.join(
-        'C:\\Users\\Administrator\\Pictures\\ImgSnagWeChat',
+        'C:\\Users\\Administrator\\Pictures\\ImgSnag',
         '2026-09-18_164633_秋天的第一杯奶茶')
     snap_dialog('下载完成', os.path.join(outdir, '11_下载完成_存进专属文件夹.png'),
                 '自动建的批次文件夹，不再让用户自己挑目录')

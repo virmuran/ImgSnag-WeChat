@@ -30,6 +30,7 @@ from .sites import get_adapter, supported_names
 from .file_utils import unique_path
 from .save_worker import SaveWorker
 from .naming import folder_name_for, unique_dir, FALLBACK_TITLE
+from .sites.base import CREDIT_FILE, CREDIT_NOTICE, credit_line
 from .library import scan_batch, title_from_folder, MAX_BATCH_BYTES
 from .settings import (
     settings, K_GEOMETRY, K_WINDOW_STATE, K_SORT_INDEX,
@@ -81,9 +82,9 @@ ABOUT_HTML = f"""
 不需要浏览器内核，安装包 30 MB。</p>
 
 <p><b>你的数据在哪</b><br>
-· 下载历史：<code>~/.imgsnag_wechat/history.db</code><br>
-· 已屏蔽的尺寸：<code>%APPDATA%\\ImgSnagWeChat\\blocked_sizes.json</code><br>
-· 界面偏好：注册表 <code>HKCU\\Software\\ImgSnagWeChat</code><br>
+· 下载历史：<code>~/.imgsnag/history.db</code><br>
+· 已屏蔽的尺寸：<code>%APPDATA%\\ImgSnag\\blocked_sizes.json</code><br>
+· 界面偏好：注册表 <code>HKCU\\Software\\ImgSnag</code><br>
 程序不收集任何信息、不上报任何数据。对外的联网只有两处 ——
 「检查更新」与你主动点的「下载更新」，都访问 GitHub；不想被自动检查打扰
 可以在下方关掉（手动点的那两次仍会联网）。</p>
@@ -156,7 +157,7 @@ class ImageDownloaderApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"ImgSnag 微信公众号版 v{VERSION}" if VERSION else "ImgSnag 微信公众号版")
+        self.setWindowTitle(f"ImgSnag v{VERSION}" if VERSION else "ImgSnag")
         self.resize(1100, 750)
         self.images: list[ImageInfo] = []
         self.thumb_items: list[ThumbnailItem] = []
@@ -168,6 +169,9 @@ class ImageDownloaderApp(QMainWindow):
         self._pending_history_id = None
         #: 本篇文章的标题（解析时由 worker 取出），用来给下载文件夹命名
         self._article_title = ""
+        #: 来源署名（公众号名 / coser 名）。与标题一样由 worker 取出。
+        #: 取不到就是空串 —— 那是**正常路径**，界面会退化成只写站点名。
+        self._article_author = ""
         #: 本次解析用的站点适配器（由 worker 按来源挑好）。界面靠它拿两样站点知识：
         #: 兜底文件夹名、URL 列的短地址显示
         self._adapter = None
@@ -443,6 +447,18 @@ class ImageDownloaderApp(QMainWindow):
         action_row.addWidget(self.download_btn)
         root.addLayout(action_row)
 
+        # 来源与版权提示。
+        #
+        # 为什么单独占一行、还要开 wordWrap：**动作栏是整窗最小宽度的瓶颈**
+        # （见 action_row 那段注释），把这句塞进 info_label 会直接把最小宽度顶上去。
+        # 开了 wordWrap 之后，它的最小宽度只取决于最长的那个"词"，长句自动折行，
+        # 不会顶窗口。默认隐藏 —— 还没解析出东西时不该占地方。
+        self.credit_label = QLabel()
+        self.credit_label.setWordWrap(True)
+        self.credit_label.setStyleSheet("font-size: 12px; color: #999; padding: 2px 0;")
+        self.credit_label.setVisible(False)
+        root.addWidget(self.credit_label)
+
         # 大图预览区（左）+ 缩略图条（右）
         content_row = QHBoxLayout()
         content_row.setSpacing(0)
@@ -542,7 +558,7 @@ class ImageDownloaderApp(QMainWindow):
 
         这个面板本身就是修复：旧的 add_blocked 是**单向门** —— 在缩略图上右键误屏蔽
         一个尺寸之后，那类图从此静默消失，既看不到屏蔽了哪些尺寸、也没有任何撤销入口，
-        只能去手改 %APPDATA%/ImgSnagWeChat/blocked_sizes.json。对目标用户（普通用户）
+        只能去手改 %APPDATA%/ImgSnag/blocked_sizes.json。对目标用户（普通用户）
         而言等于「图丢了」。这里把它变成双向的：列得出来、撤销得掉、还看得到命中多少张。
         """
         panel = QFrame()
@@ -825,7 +841,7 @@ class ImageDownloaderApp(QMainWindow):
         icon_path = resource_path("ImgSnag.ico")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
         tray = QSystemTrayIcon(icon, self)
-        tray.setToolTip(f"ImgSnag 微信公众号版 v{VERSION}" if VERSION else "ImgSnag 微信公众号版")
+        tray.setToolTip(f"ImgSnag v{VERSION}" if VERSION else "ImgSnag")
         tray.setContextMenu(self._build_tray_menu())
         tray.activated.connect(self._on_tray_activated)
         tray.show()
@@ -984,6 +1000,8 @@ class ImageDownloaderApp(QMainWindow):
         self._preview_index = -1
         self._browsing_history = False   # 开始新解析 = 离开历史浏览（下载按钮恢复）
         self._article_title = ""      # 新的一次解析，标题重新取
+        self._article_author = ""     # 署名同样重取
+        self.credit_label.setVisible(False)
         self._adapter = None          # 适配器同样重取（由新的 worker 决定）
         self.download_btn.setEnabled(False)
         self.select_all_btn.setEnabled(False)
@@ -1077,6 +1095,8 @@ class ImageDownloaderApp(QMainWindow):
         # 标题由 worker 在 run() 里取出。走到这里 all_done 已经发出来了，
         # run() 早已写完该属性，不存在读到半截的竞态。
         self._article_title = (getattr(self.worker, "article_title", "") or "").strip()
+        self._article_author = (getattr(self.worker, "article_author", "") or "").strip()
+        self._refresh_credit()
         self._on_parse_done(True)
         self.progress.setVisible(False)
         unique = sum(1 for i in images if not i.is_duplicate)
@@ -1120,6 +1140,7 @@ class ImageDownloaderApp(QMainWindow):
         self._on_parse_done(False)
         self.progress.setVisible(False)
         self.info_label.setText("解析失败")
+        self.credit_label.setVisible(False)
         self.status.showMessage(msg)
         if self._last_parsed_url:
             history_manager.add(
@@ -1129,6 +1150,39 @@ class ImageDownloaderApp(QMainWindow):
             self._last_parsed_url = ""
             self._current_history_id = None
         QMessageBox.warning(self, "解析失败", msg)
+
+    def _site_name(self) -> str:
+        """当前站点的界面名。没有适配器（如浏览历史）时给空串，由 credit_line 兜底"""
+        return getattr(self._adapter, "display_name", "") or ""
+
+    def _refresh_credit(self):
+        """按当前来源刷新那一行提示。没有可说的就藏起来，而不是显示一句空话。"""
+        if self._browsing_history or not self.images:
+            # 浏览本地图库时是"某个目录里的图"，没有站点概念，别硬套一个来源
+            self.credit_label.setVisible(False)
+            return
+        line = credit_line(self._article_author, self._site_name())
+        self.credit_label.setText(f"{line} — {CREDIT_NOTICE}")
+        self.credit_label.setVisible(True)
+
+    def _write_credit_file(self, folder: str):
+        """在批次目录里落一份来源说明 —— 图离开这个软件之后也还带着出处。
+
+        写成 .txt 不会干扰图库浏览：library.scan_batch 只认图片扩展名，
+        非图片文件既不会显示、也不会被算进张数。
+
+        写不进去不打扰用户 —— 图本身已经存好了，这只是一句提醒，
+        为它弹一个错误框属于本末倒置。
+        """
+        if not folder:
+            return
+        line = credit_line(self._article_author, self._site_name())
+        try:
+            path = os.path.join(folder, CREDIT_FILE)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(f"{line}\n\n{CREDIT_NOTICE}\n")
+        except OSError as e:
+            print(f"  credit file skipped: {e}")
 
     def _selectable_items(self):
         """参与批量选择/下载的图：被过滤掉的和重复图都不算"""
@@ -1270,7 +1324,7 @@ class ImageDownloaderApp(QMainWindow):
         return d if d and os.path.isdir(d) else ""
 
     def _library_root(self) -> str:
-        """图库根目录：设置里指定的；没指定就用系统「图片」下的 ImgSnagWeChat。
+        """图库根目录：设置里指定的；没指定就用系统「图片」下的 ImgSnag。
 
         默认特意**不放在「下载」里** —— 那是最常被顺手清空的目录，图集躺在里面
         迟早跟着一起被删，历史里的「打开」也就断了。图库独立出来之后，
@@ -1282,7 +1336,7 @@ class ImageDownloaderApp(QMainWindow):
         base = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         if not base:                                    # 极端环境下取不到「图片」位置
             base = os.path.expanduser("~")
-        return os.path.join(base, "ImgSnagWeChat")
+        return os.path.join(base, "ImgSnag")
 
     def _fallback_title(self) -> str:
         """当前解析所用站点的兜底文件夹名。
@@ -1408,6 +1462,7 @@ class ImageDownloaderApp(QMainWindow):
         self.download_btn.setText(f"保存中 {current}/{total}")
 
     def _on_save_done(self, saved, fallback, errors, folder):
+        self._write_credit_file(folder)
         if self._pending_history_id:
             history_manager.update(
                 self._pending_history_id,
@@ -1420,6 +1475,7 @@ class ImageDownloaderApp(QMainWindow):
         self._update_download_btn()   # 恢复按钮文案与可用状态
 
         msg = f"已保存 {saved} 张图片到:\n{folder}"
+        msg += f"\n\n{credit_line(self._article_author, self._site_name())}"
         if fallback:
             msg += f"\n\n其中 {fallback} 张格式转换失败，已按原格式保存。"
         if errors:
@@ -1756,6 +1812,8 @@ class ImageDownloaderApp(QMainWindow):
         self._reset_for_browse()
         # 标题参与「另存到…」的新文件夹命名，所以剥掉日期前缀，别叠成两层
         self._article_title = title_from_folder(folder)
+        self._article_author = ""        # 本地图库没有站点概念
+        self.credit_label.setVisible(False)
         # 上面这行排在 _reset_for_browse 之后，而复制按钮是在那边统一刷新的 ——
         # 赋值完必须再刷一次，否则「查看」进去后「复制标题」一直是灰的
         self._update_copy_btn()
@@ -1869,11 +1927,11 @@ class ImageDownloaderApp(QMainWindow):
         box.setSpacing(10)
 
         head = QLabel(
-            "<div style='font-size:17px; font-weight:bold;'>ImgSnag · 微信公众号版"
+            "<div style='font-size:17px; font-weight:bold;'>ImgSnag"
             f"<span style='font-size:12px; font-weight:normal; color:#888;'>"
             f"  v{VERSION or '未知'}</span></div>"
-            "<div style='font-size:12px; color:#666;'>一键提取公众号文章正文图片，"
-            "批量下载无水印原图</div>"
+            "<div style='font-size:12px; color:#666;'>一键提取文章正文图片，"
+            "批量下载原图</div>"
         )
         head.setTextFormat(Qt.RichText)
         box.addWidget(head)

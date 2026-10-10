@@ -286,7 +286,7 @@ def test_helpers():
     check(web.session_id('https://a') != web.session_id('https://b'), '不同地址不同号')
     eq(len(web.session_id('x')), 12, '会话号是 12 位')
 
-    eq(web.title_from_path('Pictures/ImgSnagWeChat/2026-10-06_1133_标题在这'),
+    eq(web.title_from_path('Pictures/ImgSnag/2026-10-06_1133_标题在这'),
        '标题在这', '从相册路径里取回标题')
     eq(web.title_from_path(''), '', '空路径不炸')
     check('今天' in web.pretty_time(datetime.now().isoformat()),
@@ -825,6 +825,119 @@ APK_CREATED = '2026-10-06T07:12:33Z'        # 远端那个安装包的构建时�
 APK_INSTALLED = '2026-10-06T07:00:00Z'      # 本机上装着的那一份的时刻（UTC）
 
 
+# ── 来源提示与 Referer（手机端，2026-10-10 加）──────────────────────
+#: cosmeitu 详情页的最小样子：两行带编号的正文图 + 一行 Coser 署名。
+COS_URL = 'https://www.cosmeitu.com/22252.html'
+COS_IMG_A = 'https://hk.66372188.xyz/2026/10/08/aaa.jpg'
+COS_IMG_B = 'https://hk.66372188.xyz/2026/10/08/bbb.jpg'
+
+
+def cos_article() -> str:
+    return ('<html><head><title>魅魔cosplay</title></head><body>'
+            '<h1 class="article-title">魅魔cosplay</h1>'
+            '<span>\U0001f4f8 Coser：洛城雪Yuki</span>'
+            f'<img data-src="{COS_IMG_A}" title="魅魔cosplay (2/2)">'
+            f'<img data-src="{COS_IMG_B}" title="魅魔cosplay (1/2)">'
+            '</body></html>')
+
+
+class NetWithHeaders:
+    """记下**每次请求带的头**的假网络。
+
+    普通的 FakeGet 只记地址，验不了"Referer 由站点决定"这件事 ——
+    而 cosmeitu 那批图恰恰是因为多带了一个 Referer 才整批 403
+    （页面地址被当成了 Referer，而那个图床是「带了就拒」）。
+    """
+
+    def __init__(self, pages):
+        self.pages = dict(pages)
+        self.seen = []
+
+    def __call__(self, url, **kw):
+        self.seen.append((url, dict(kw.get('headers') or {})))
+        if url in self.pages:
+            return android._Response(200, self.pages[url].encode('utf-8'))
+        return android._Response(200, b'\xff\xd8\xff\xe0' + b'X' * 900)
+
+    def downloads(self, needle):
+        return [h for u, h in self.seen if needle in u]
+
+    def reset(self):
+        self.seen = []
+
+
+def test_credit_and_referer():
+    print('[15] 来源提示与 Referer（手机端）')
+    tmp = tempfile.mkdtemp()
+    try:
+        net = NetWithHeaders({ARTICLE_URL: article(), COS_URL: cos_article()})
+        cli, _fake, _album = _boot(tmp, fake=net, settings={'skip_tiny': False})
+
+        # ── 微信：照旧带 Referer，来源提示里有站点名 ──
+        cli.post('/api/parse', {'source': ARTICLE_URL})
+        st = cli.wait(want=('ready', 'error'))
+        eq(st['phase'], 'ready', '微信文章解析完成')
+        check('来源' in st.get('credit', ''), f"状态里带来源提示：{st.get('credit')!r}")
+        check('版权' in st.get('credit', ''), '来源提示里带版权提醒')
+        check('微信公众号' in st.get('credit', ''), '来源提示里写的是适配器给的站点名')
+
+        net.reset()
+        cli.post('/api/save', {'idxs': [1, 2]})
+        cli.wait(want=('saved', 'error'))
+        wx = net.downloads('mmbiz.qpic.cn')
+        check(wx and all(h.get('Referer') == ARTICLE_URL for h in wx),
+              '微信下载**仍然**带 Referer —— 不能为了 cosmeitu 一刀切去掉')
+
+        # ── cosmeitu：**不带** Referer（带了整批 403），来源提示给 coser 名 ──
+        net.reset()
+        cli.post('/api/parse', {'source': COS_URL})
+        st = cli.wait(want=('ready', 'error'))
+        eq(st['phase'], 'ready', 'cosmeitu 文章解析完成')
+        eq(st['count'], 2, '正文两张都提出来了')
+        credit = st.get('credit', '')
+        eq(credit.split(' —')[0], '图片来源：洛城雪Yuki（cosmeitu.com）',
+           f'来源用的是适配器给的署名与站点名：{credit!r}')
+
+        net.reset()
+        cli.post('/api/save', {'idxs': [1, 2]})
+        cli.wait(want=('saved', 'error'))
+        cos = net.downloads('66372188.xyz')
+        check(cos, 'cosmeitu 的图确实被下载了')
+        check(all('Referer' not in h for h in cos),
+              'cosmeitu 下载**不带** Referer —— 带了整页 403，一张都下不来')
+
+        # ── 从历史里重开那一次 cosmeitu ──
+        # 重开走的是 `open_history`，它**自己**设一遍请求头 —— 与解析那条路
+        # 是两段独立的代码。历史上真出过"修了一条、另一条照旧"的事，所以
+        # 这里也走一遍完整的"重开 → 保存"。
+        rows = cli.json('/api/history')['items']
+        row = [r for r in rows if r.get('title') == '魅魔cosplay'][0]
+        eq(row['has_cache'], True, 'cosmeitu 那次的会话缓存还在')
+        r = cli.post('/api/history/open', {'id': row['id']})
+        check(r['ok'] is True, '能重开 cosmeitu 那一次')
+        st = cli.json('/api/state')
+        eq(st['phase'], 'ready', '重开之后是就绪态')
+        check('洛城雪Yuki' in st.get('credit', ''),
+              f'重开之后署名还在（会话里存着）：{st.get("credit")!r}')
+
+        net.reset()
+        cli.post('/api/save', {'idxs': [1, 2]})
+        cli.wait(want=('saved', 'error'))
+        cos2 = net.downloads('66372188.xyz')
+        check(cos2, '重开之后确实又下载了一遍')
+        check(all('Referer' not in h for h in cos2),
+              '从历史重开再下载**仍然**不带 Referer（这是另一条设置头的路径）')
+
+        # 换一篇文章，来源提示要跟着换（不能把上一篇的署名留下）
+        net.reset()
+        cli.post('/api/parse', {'source': ARTICLE_URL})
+        st = cli.wait(want=('ready', 'error'))
+        check('cosmeitu' not in st.get('credit', ''),
+              f'换了文章之后不残留上一篇的来源：{st.get("credit")!r}')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def release_json(created=APK_CREATED, name=APK_ASSET, tag='v1.10.0', digest='',
                  size=11500000):
     """GitHub「取最新正式发布」的假响应（只放我们真正会读的字段）。
@@ -848,7 +961,7 @@ def release_json(created=APK_CREATED, name=APK_ASSET, tag='v1.10.0', digest='',
         apk['digest'] = digest
     return json.dumps({
         'tag_name': tag,
-        'html_url': 'https://github.com/virmuran/ImgSnag-WeChat/releases/latest',
+        'html_url': 'https://github.com/virmuran/ImgSnag/releases/latest',
         'body': '更新说明',
         'assets': [
             {'name': '0-readme.txt', 'size': 12, 'browser_download_url': '',
@@ -1224,6 +1337,13 @@ def test_page_contract():
     check("'/api/save'" in page, '有保存到相册的动作')
     check('全选' in page, '有全选（几十张时不能靠手点）')
 
+    # 来源与版权提示（手机端也要有 —— 桌面版有、手机没有的话，
+    # 用户会以为是两个不同的东西）
+    check('id="creditLine"' in page, '结果页有来源提示那一行')
+    check('s.credit' in page, '页面用到了状态里的来源字段')
+    check(re.search(r"credit\.hidden\s*=", page) is not None,
+          '来源行能隐藏（取不到站点信息时不显示一行空的）')
+
     # 大图要能左右滑（用户实测反馈："只能返回再点第二张"）
     # ⚠ 一律带引号或括号一起比对：裸写 `'touchstart' in page`，
     #   把事件名改成 `touchstartx` 照样命中（子串），断言是假的。
@@ -1508,7 +1628,7 @@ def test_isolation():
             "import os, sys\n"
             f"sys.path.insert(0, r'{ROOT}')\n"
             "import web_image_dl.history_manager as hm\n"
-            "d = os.path.join(os.path.expanduser('~'), '.imgsnag_wechat')\n"
+            "d = os.path.join(os.path.expanduser('~'), '.imgsnag')\n"
             "print('DIR' if os.path.isdir(d) else 'NONE')\n"
             "hm.history_manager\n"
             "print('DIR' if os.path.isdir(d) else 'NONE')\n"
@@ -1531,7 +1651,7 @@ def main():
                test_partial_download, test_errors, test_net_failure_falls_back,
                test_album_failure, test_inspect_tiny, test_quality_toggle,
                test_settings, test_pick_source, test_update_check, test_update_download,
-               test_page_contract,
+               test_credit_and_referer, test_page_contract,
                test_java_contract, test_isolation):
         try:
             fn()

@@ -559,6 +559,30 @@ def test_extract_title():
     eq(w.article_title, '喂给 worker 的标题', 'worker.run() 后带出标题')
 
 
+def test_download_headers():
+    print('\n[13] 下载头里的 Referer 由站点自己决定')
+    from web_image_dl.sites.weixin import weixin
+    from web_image_dl.sites.cosmeitu import cosmeitu
+
+    # 默认站点（微信）：沿用页面地址，与改造前完全一致
+    h = FetchWorker._download_headers(weixin, 'https://mp.weixin.qq.com/s/x', True)
+    eq(h.get('Referer'), 'https://mp.weixin.qq.com/s/x', '默认站点沿用页面地址作 Referer')
+
+    # cosmeitu：不带 —— 它的图床是「带了就 403」的反向防盗链
+    # （实测同一张图：不带 → 200，带 → 403，整批图会全下不来）
+    h = FetchWorker._download_headers(cosmeitu, 'https://www.cosmeitu.com/22252.html', True)
+    check('Referer' not in h, 'cosmeitu 下载不带 Referer')
+
+    # 粘贴源码：没有来源页可填，本来就不该带
+    h = FetchWorker._download_headers(weixin, '这段是源码不是地址', False)
+    check('Referer' not in h, '粘贴源码时没有来源页，不带 Referer')
+
+    # 适配器缺失也不能炸（注册表为空时才会发生，但别让线程静默死掉）
+    h = FetchWorker._download_headers(None, 'https://x/', True)
+    check('Referer' not in h, '适配器缺失时不带 Referer，也不抛异常')
+    check(h.get('User-Agent'), '通用请求头仍然在')
+
+
 def main():
     test_url_rewrite()
     test_extract()
@@ -571,6 +595,7 @@ def main():
     test_save_worker()
     test_cancel()
     test_extract_title()
+    test_download_headers()
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')
     if _failed:

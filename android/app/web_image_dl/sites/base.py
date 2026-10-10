@@ -6,16 +6,19 @@
 设计意图：让「新增一个站点」变成 **只新增一个文件 + 注册表加一行**，
 而不是回头改 `worker.py` / `app.py` / `naming.py` 里的散落判断。
 
-接口共 7 个方法，一一对应改造前散落在各处的 7 个耦合点（见 SITE_ADAPTER_PLAN.md）：
+接口共 9 个方法：前 7 个一一对应改造前散落在各处的 7 个耦合点
+（见 SITE_ADAPTER_PLAN.md），后 2 个是接第二个站点时补上的：
 
-    #  方法             改造前长在哪
-    1  matches()        app.py 的 is_wechat_url
-    2  extract()        worker.py → extractor.extract_image_urls
-    3  extract_title()  worker.py → extractor.extract_title
-    4  candidates()     worker.py._candidate_urls（画质档位知识）
-    5  ext_for()        worker.py 里内联的 wx_fmt=png 判断
-    6  display_url()    app.py._short_url 的固定前缀裁剪
-    7  sniff()          新增：粘贴 HTML 时识别它属于哪个站点
+    #  方法                 改造前长在哪
+    1  matches()            app.py 的 is_wechat_url
+    2  extract()            worker.py → extractor.extract_image_urls
+    3  extract_title()      worker.py → extractor.extract_title
+    4  candidates()         worker.py._candidate_urls（画质档位知识）
+    5  ext_for()            worker.py 里内联的 wx_fmt=png 判断
+    6  display_url()        app.py._short_url 的固定前缀裁剪
+    7  sniff()              新增：粘贴 HTML 时识别它属于哪个站点
+    8  extract_author()     新增：来源署名，给界面上的版权提示用
+    9  download_referer()   新增：下载图片时带不带 Referer（每个图床脾气不同）
 
 **只有 matches / extract 必须由子类实现**，其余都有合理的默认实现 ——
 一个结构简单的站点可以只写这两条，不必为了凑接口写空方法。
@@ -50,6 +53,42 @@ def guess_ext_from_url(url: str, default: str = '.jpg') -> str:
     return default
 
 
+# ============================================================================
+#  来源署名与版权提示
+# ============================================================================
+
+#: 版权提醒正文。**只有这一份** —— 界面、落盘、将来任何要显示它的地方都从这里取，
+#: 免得同一句话在两处各写一遍、改一处漏一处（本项目已经吃过好几次这种亏）。
+#:
+#: 口径（2026-10-10 与沐然定）：ImgSnag 只是个提取工具，用户点开链接的那一刻
+#: 就知道图是从哪来的，所以软件**不去追溯版权归属**，只把来源如实标出来、
+#: 再补一句提醒。取不到具体署名不是错误，如实说「来源：<站点名>」即可。
+CREDIT_NOTICE = (
+    '本工具只提取图片，版权归原作者所有。请勿用于商业用途，转发请注明出处。'
+)
+
+#: 落到批次目录里的来源说明文件名。桌面版与手机端都用这一个名字 ——
+#: 两处各写一遍字面量，改一处漏一处（本项目已经吃过好几次这种亏）。
+CREDIT_FILE = '来源说明.txt'
+
+
+def credit_line(author: str, display_name: str) -> str:
+    """拼一行来源说明。
+
+    有署名 → ``图片来源：<作者>（<站点>）``
+    没署名 → ``来源：<站点>``            —— 认不出作者不是错误，如实说即可
+    """
+    name = (author or '').strip()
+    site = (display_name or '').strip()
+    if name and site:
+        return f'图片来源：{name}（{site}）'
+    if name:
+        return f'图片来源：{name}'
+    if site:
+        return f'来源：{site}'
+    return '来源：未知'
+
+
 class SiteAdapter:
     """一个站点的图片提取策略。
 
@@ -63,6 +102,8 @@ class SiteAdapter:
       ext_for(url)          由 URL 推断扩展名（默认用通用规则）
       display_url(url)      界面上显示的短地址（默认原样）
       sniff(html)           这段 HTML 像不像本站点，返回命中特征数（默认 0 = 不认识）
+      extract_author(html)  来源署名（默认取不到，界面退化成只写站点名）
+      download_referer(url) 下载图片时用哪个 Referer（默认沿用页面地址；空串＝不带）
 
     ── 类属性 ──
       name            内部标识，小写无空格，用于日志（如 "weixin"）
@@ -143,3 +184,28 @@ class SiteAdapter:
         不要去匹配会随模板调整的 HTML 结构。
         """
         return 0
+
+    def extract_author(self, html: str) -> str:
+        """⑧ 取来源署名 —— 公众号名 / 作者名 / coser 名，取不到返回空串。
+
+        用途：界面上的版权提示。ImgSnag 只是个提取工具，用户点开链接的那一刻
+        就知道图是从哪来的，所以这里**不负责追溯版权归属**，只把来源如实标出来。
+
+        **取不到就返回空串，不要编一个** —— 调用方会退化成
+        `credit_line('', display_name)`，也就是「来源：<站点名>」+ 通用提醒。
+        编出来的假署名比没有署名更糟。
+        """
+        return ''
+
+    def download_referer(self, page_url: str) -> str:
+        """⑨ 下载图片时带哪个 Referer。**返回空串表示不带这个头。**
+
+        默认沿用页面地址 —— 有些图床会校验来源页，带上更保险。
+
+        但**也确实有反着来的图床**：阿里云 OSS 的防盗链可以配成「带了 Referer
+        就拒」，这时带上反而每次都 403，整批图全下不来。这类站点的适配器在
+        这里返回空串即可，下载环节会照做（见 worker._download_one 的调用处）。
+
+        ⚠ 这是**下载图片**时用的头，与抓页面那次请求无关。
+        """
+        return page_url or ''

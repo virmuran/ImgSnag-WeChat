@@ -53,7 +53,7 @@ except Exception:      # pragma: no cover - 打包异常路径下不阻断启动
         return bool(re.match(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$", str(text).strip()))
 
 
-GITHUB_REPO = "virmuran/ImgSnag-WeChat"
+GITHUB_REPO = "virmuran/ImgSnag"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 SOURCE_URL = f"https://github.com/{GITHUB_REPO}"
@@ -78,11 +78,11 @@ DEFAULT_TIMEOUT = 10.0
 
 ASSET_KIND_LABELS = {"installer": "安装包", "portable": "便携包", "file": "更新文件"}
 
-#: 判断 .exe 是不是安装包（Inno Setup 产物形如 ImgSnagWeChat_1.6.0_setup.exe）
+#: 判断 .exe 是不是安装包（Inno Setup 产物形如 ImgSnag_1.6.0_setup.exe）
 INSTALLER_HINTS = ("setup", "install", "installer")
 
 #: 合并后的 CA 包落盘位置（与下载历史数据库同目录）
-CA_BUNDLE_PATH = os.path.join(os.path.expanduser("~/.imgsnag_wechat"), "ca_bundle.pem")
+CA_BUNDLE_PATH = os.path.join(os.path.expanduser("~/.imgsnag"), "ca_bundle.pem")
 
 #: CA 包多久重建一次。证书存储会变（装/卸加速器、公司推新根证书），
 #: 不做失效就会一直用一份过期的包；每次都重建又太浪费（要读几十张证书）
@@ -232,7 +232,7 @@ def classify_asset(name: str) -> str:
 
 
 def extract_version_from_name(name: str) -> str:
-    """'ImgSnagWeChat_1.6.0_setup.exe' → '1.6.0'（用于发现 tag 与资产名不一致）"""
+    """'ImgSnag_1.6.0_setup.exe' → '1.6.0'（用于发现 tag 与资产名不一致）"""
     m = re.search(r"(\d+(?:\.\d+)+)", name or "")
     return m.group(1) if m else ""
 
@@ -268,7 +268,7 @@ def fetch_latest_release(url: str = API_URL, timeout: float = DEFAULT_TIMEOUT) -
         "timeout": timeout,
         "headers": {
             "Accept": "application/vnd.github+json",
-            "User-Agent": f"ImgSnag-WeChat/{LOCAL_VERSION or 'dev'}",
+            "User-Agent": f"ImgSnag/{LOCAL_VERSION or 'dev'}",
         },
     }
     # 用「certifi + 系统证书存储」的合并包。拿不到就不传，退回 requests 默认（certifi）

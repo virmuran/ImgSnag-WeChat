@@ -21,7 +21,7 @@ def main():
     # 否则一收托盘程序当场就没了。真退出统一走 ImageDownloaderApp._quit_app() /
     # closeEvent 的 quit 分支 → QApplication.quit()。
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("ImgSnag 微信公众号版")
+    app.setApplicationName("ImgSnag")
     app.setApplicationVersion(VERSION)
     icon_path = resource_path("ImgSnag.ico")
     if os.path.exists(icon_path):

@@ -543,14 +543,14 @@ def test_docs():
     doc = read(README)
     check('apk' in doc.lower(), '说明里讲了怎么拿 APK')
     check('未知应用' in doc, '讲了小米/红米要允许安装未知应用')
-    check('ImgSnagWeChat' in doc, '说明了图片存到哪儿')
+    check('ImgSnag' in doc, '说明了图片存到哪儿')
 
-    # 路径要**连着**检查。分开查 'Pictures' 和 'ImgSnagWeChat' 是假断言 ——
+    # 路径要**连着**检查。分开查 'Pictures' 和 'ImgSnag' 是假断言 ——
     # 删掉真正的路径那一行，这两个词在别处（目录树、相册截图说明）照样出现，
     # 断言不会红。（这条也是被反向验证抓出来的。）
     flat = re.sub(r'\s+', '', doc)
-    check('Pictures/ImgSnagWeChat' in flat,
-          '写清了完整的相册路径 Pictures/ImgSnagWeChat')
+    check('Pictures/ImgSnag' in flat,
+          '写清了完整的相册路径 Pictures/ImgSnag')
 
 
 def test_gitignore():
@@ -600,7 +600,7 @@ def test_desktop_workflow():
     # ⚠ 简中语言文件必须随仓库分发：官方 Inno Setup 6（云上那版）不自带
     #   ChineseSimplified.isl，本机 Inno 7 才内置。iss 若引 compiler: 相对路径，
     #   本机编译全绿、云上 Inno 编译一步就挂 —— 又是"本地过云端炸"的静默类。
-    iss_path = os.path.join(ROOT, 'ImgSnagWeChat.iss')
+    iss_path = os.path.join(ROOT, 'ImgSnag.iss')
     check(os.path.exists(iss_path), 'Inno 脚本存在')
     iss = read(iss_path)
     m = re.search(r'MessagesFile:\s*"([^"]+)"', iss)

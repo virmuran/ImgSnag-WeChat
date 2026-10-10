@@ -241,7 +241,8 @@ def build_report(res, lines, retried=False) -> str:
         tail = f'共 {len(res.saved)} 张，{imgsnag.human_size(res.total_bytes)}'
         if res.skipped:
             tail += f'（跳过 {res.skipped} 张：重复或没下下来）'
-        parts = [p for p in (head, body, tail) if p]
+        parts = [p for p in (head, body, tail,
+                             getattr(res, 'credit', '')) if p]
         return '\n'.join(parts)
 
     msg = polish(res.message) or '一张图都没拿到。'
@@ -278,8 +279,11 @@ def snag_text(text, workdir, get=None):
 
         get = get or make_get(ssl_context(cache_dir=workdir))
         lines = []
+        # ⚠ 这个 pending 目录会被 Java **原样**搬进相册 —— 不能往里写
+        # 「来源说明.txt」（会被当 image/jpeg 收下，张数也跟着多一张）。
         res = imgsnag.snag(source, is_url=is_url, out_root=pending,
-                           adapter=adapter, get=get, log=lines.append)
+                           adapter=adapter, get=get, log=lines.append,
+                           credit_file=False)
 
         # 一篇文章的图常常藏在页面脚本里（模板改版时尤其明显）。
         # 桌面版为此留了 --scripts，手机上没有命令行开关，
@@ -291,7 +295,8 @@ def snag_text(text, workdir, get=None):
             lines.append('这篇文章里没直接看到图，换一种方式再找一遍…')
             res = imgsnag.snag(source, is_url=is_url, out_root=pending,
                                include_scripts=True, adapter=adapter,
-                               get=get, log=lines.append)
+                               get=get, log=lines.append,
+                               credit_file=False)
 
         return build_report(res, lines, retried=retried)
 

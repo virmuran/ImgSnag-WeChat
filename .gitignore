@@ -39,9 +39,9 @@ captures/
 *.msi
 *.dll
 *.pyd
-ImgSnagWeChat_*_portable.zip
+ImgSnag_*_portable.zip
 
-# ── 用户运行时数据（正常在用户目录：~/.imgsnag_wechat、%APPDATA%/ImgSnagWeChat）──
+# ── 用户运行时数据（正常在用户目录：~/.imgsnag、%APPDATA%/ImgSnag）──
 # 兜底：调试时若被改到项目内，不应提交
 history.db
 blocked_sizes.json

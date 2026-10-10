@@ -88,6 +88,7 @@ FILES = {
     'sites/__init__.py': '适配器注册表（决定"认不认识这个链接"）',
     'sites/base.py':    '适配器接口与通用扩展名推断',
     'sites/weixin.py':  '微信公众号全部站点知识（原图档 / 去水印 / 正文顺序）',
+    'sites/cosmeitu.py': 'cosmeitu.com 全部站点知识（懒加载 data-src / 编号顺序 / OSS 原图档）',
 }
 
 #: 除 web_image_dl/ 之外还要一起搬的文件：(源文件, 目标内相对路径, 作用)。

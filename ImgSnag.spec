@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# ImgSnag 微信公众号版 打包配置（onedir 模式，与 ChemCal 一致）
+# ImgSnag 打包配置（onedir 模式，与 ChemCal 一致）
 # - onedir：不再解压到 %TEMP%，启动快、杀软误报少；分发用 Inno Setup 或便携 zip
 # - 无 playwright / 无 Chromium：体积相比旧版通用 ImgSnag 大幅缩小
 
@@ -35,7 +35,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,   # onedir：二进制交给 COLLECT，不塞进 exe
-    name='ImgSnagWeChat',
+    name='ImgSnag',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -57,5 +57,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='ImgSnagWeChat',
+    name='ImgSnag',
 )

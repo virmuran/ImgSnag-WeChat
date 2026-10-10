@@ -23,8 +23,8 @@
 
 ```sh
 pkg update -y && pkg install -y git
-git clone https://github.com/virmuran/ImgSnag-WeChat.git
-bash ImgSnag-WeChat/android/install.sh
+git clone https://github.com/virmuran/ImgSnag.git
+bash ImgSnag/android/install.sh
 ```
 
 第三条会自己装好 Python、requests，并把程序装到手机里。
@@ -51,7 +51,7 @@ bash ImgSnag-WeChat/android/install.sh
 图会自动下完，存到：
 
 ```
-手机存储 / Pictures / ImgSnagWeChat / 日期_时间_文章标题 /
+手机存储 / Pictures / ImgSnag / 日期_时间_文章标题 /
         img_01.jpg  img_02.jpg  img_03.jpg …
 ```
 
@@ -129,14 +129,14 @@ Android 会自己扫，但可能要等一会儿或重启相册 App。
 **更新**（电脑端的解析规则改了之后）：
 
 ```sh
-cd ~/ImgSnag-WeChat && git pull
+cd ~/ImgSnag && git pull
 bash android/install.sh
 ```
 
 **卸载**：
 
 ```sh
-rm -rf ~/imgsnag ~/bin/imgsnag ~/bin/termux-url-opener ~/ImgSnag-WeChat
+rm -rf ~/imgsnag ~/bin/imgsnag ~/bin/termux-url-opener ~/ImgSnag
 ```
 
 已下载的图片不受影响（它们在相册目录里，自己删就行）。

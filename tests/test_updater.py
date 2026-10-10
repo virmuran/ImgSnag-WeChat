@@ -115,7 +115,7 @@ def test_tag_and_compare():
     eq(info_for('1.9.0', tag='v1.6').has_update, False, '不规范 tag 反向比较也不会倒挂')
 
     eq(U.CHECK_INTERVAL, 6 * 3600, '自动检查间隔是 6 小时（GitHub 未认证限流 60 次/小时）')
-    check(U.GITHUB_REPO == 'virmuran/ImgSnag-WeChat', '仓库地址写的是本项目（改错仓库就永远查不到更新）')
+    check(U.GITHUB_REPO == 'virmuran/ImgSnag', '仓库地址写的是本项目（改错仓库就永远查不到更新）')
     check(U.API_URL.endswith('/releases/latest'), '接口用的是 latest 而不是列表（草稿/预发布不会混进来）')
 
 
@@ -125,14 +125,14 @@ def test_tag_and_compare():
 
 def test_assets():
     print('\n[UP-2] 发行资产识别（安装包 / 便携包分得清）')
-    eq(U.classify_asset('ImgSnagWeChat_1.6.0_setup.exe'), 'installer', 'setup.exe → 安装包')
-    eq(U.classify_asset('ImgSnagWeChat_1.6.0_installer.exe'), 'installer', 'installer.exe 也算安装包')
-    eq(U.classify_asset('ImgSnagWeChat_1.6.0_portable.zip'), 'portable', '.zip → 便携包')
-    eq(U.classify_asset('ImgSnagWeChat.exe'), 'file', '裸 exe 归为其他文件')
+    eq(U.classify_asset('ImgSnag_1.6.0_setup.exe'), 'installer', 'setup.exe → 安装包')
+    eq(U.classify_asset('ImgSnag_1.6.0_installer.exe'), 'installer', 'installer.exe 也算安装包')
+    eq(U.classify_asset('ImgSnag_1.6.0_portable.zip'), 'portable', '.zip → 便携包')
+    eq(U.classify_asset('ImgSnag.exe'), 'file', '裸 exe 归为其他文件')
     eq(U.classify_asset('checksums.txt'), 'file', '非 exe/zip 归为其他')
     eq(U.classify_asset(''), 'file', '空名字不炸')
 
-    eq(U.extract_version_from_name('ImgSnagWeChat_1.6.0_setup.exe'), '1.6.0', '从文件名抠版本号')
+    eq(U.extract_version_from_name('ImgSnag_1.6.0_setup.exe'), '1.6.0', '从文件名抠版本号')
     eq(U.extract_version_from_name('portable.zip'), '', '抠不到就返回空串')
 
     eq(U.human_size(0), '未知大小', '0 字节不显示成 0 B（接口没给大小）')
@@ -142,8 +142,8 @@ def test_assets():
     eq(U.human_size(29712382), '28.3 MB', '安装包体积按 MB 显示')
 
     info = U.check_for_updates(fetch=_fetcher(_release(assets=[
-        _asset('ImgSnagWeChat_1.6.0_portable.zip', 31_800_000),
-        _asset('ImgSnagWeChat_1.6.0_setup.exe', 30_500_000),
+        _asset('ImgSnag_1.6.0_portable.zip', 31_800_000),
+        _asset('ImgSnag_1.6.0_setup.exe', 30_500_000),
     ])), current='1.5.0')
     eq([a.kind for a in info.assets], ['installer', 'portable'],
        '资产按「安装包优先」排序（用户最可能想要的那个排第一）')
@@ -229,12 +229,12 @@ def test_error_branches():
 def test_diagnostics():
     print('\n[UP-4] 诊断：tag 与资产名版本不一致要能被发现')
     ok = U.check_for_updates(fetch=_fetcher(_release(tag='v1.6.0', assets=[
-        _asset('ImgSnagWeChat_1.6.0_setup.exe'),
+        _asset('ImgSnag_1.6.0_setup.exe'),
     ])), current='1.5.0')
     eq(ok.version_mismatch, False, 'tag 与资产名一致时不报警')
 
     bad = U.check_for_updates(fetch=_fetcher(_release(tag='v1.5.0', assets=[
-        _asset('ImgSnagWeChat_1.6.0_setup.exe'),      # 发版时手滑：tag 忘了改
+        _asset('ImgSnag_1.6.0_setup.exe'),      # 发版时手滑：tag 忘了改
     ])), current='1.4.0')
     eq(bad.version_mismatch, True, 'tag 与资产名版本不一致时报警（客户端只认 tag）')
     eq(bad.has_update, True, '本地 1.4.0 → 仍按 tag 判定有新版本')
@@ -323,7 +323,7 @@ def test_real_fetch_path():
             return _Resp()
 
     orig = U.requests
-    # 千万别真往 ~/.imgsnag_wechat/ca_bundle.pem 写东西：把包指到临时目录
+    # 千万别真往 ~/.imgsnag/ca_bundle.pem 写东西：把包指到临时目录
     ca_dir = tempfile.mkdtemp(prefix='imgsnag_ca_')
     orig_ca = U.CA_BUNDLE_PATH
     U.CA_BUNDLE_PATH = os.path.join(ca_dir, 'ca_bundle.pem')
@@ -434,7 +434,7 @@ def test_ca_bundle():
     with mock.patch.object(U.ssl, 'enum_certificates', None, create=True):
         eq(U.system_ca_bundle(target3), None, '非 Windows（无 enum_certificates）→ None，退回 certifi')
 
-    # 目录不存在时要自己建出来（用户从没运行过下载时 ~/.imgsnag_wechat 可能还没建）
+    # 目录不存在时要自己建出来（用户从没运行过下载时 ~/.imgsnag 可能还没建）
     nested = os.path.join(tempfile.mkdtemp(prefix='imgsnag_ca8d_'), 'nope', 'deep', 'ca.pem')
     with mock.patch.object(U.ssl, 'enum_certificates', _fake_enum({'ROOT': [_DER_A]}), create=True):
         eq(U.system_ca_bundle(nested), nested, '目标目录不存在时自动创建')
@@ -442,7 +442,7 @@ def test_ca_bundle():
 
     # 默认位置落在程序自己的数据目录里
     check(os.path.basename(U.CA_BUNDLE_PATH) == 'ca_bundle.pem', '默认包名固定')
-    check('.imgsnag_wechat' in U.CA_BUNDLE_PATH, '默认落在 ~/.imgsnag_wechat（与历史数据库同处）')
+    check('.imgsnag' in U.CA_BUNDLE_PATH, '默认落在 ~/.imgsnag（与历史数据库同处）')
 
 
 def test_cert_error_message():
@@ -502,7 +502,7 @@ def test_update_download():
 
     # ---- 形态判断：看 exe 自己所在的目录，不看进程的当前目录 ----
     d1 = tempfile.mkdtemp(prefix='imgsnag_mode_')
-    exe1 = os.path.join(d1, 'ImgSnagWeChat.exe')
+    exe1 = os.path.join(d1, 'ImgSnag.exe')
     open(exe1, 'wb').write(b'MZ')
     eq(D.detect_install_mode(exe1), D.MODE_PORTABLE, '只有主程序 → 便携版')
     open(os.path.join(d1, D.UNINSTALLER_NAME), 'wb').write(b'MZ')
@@ -510,18 +510,18 @@ def test_update_download():
        f'同目录有 {D.UNINSTALLER_NAME} → 安装版')
     sub = os.path.join(d1, 'sub')
     os.makedirs(sub, exist_ok=True)
-    eq(D.detect_install_mode(os.path.join(sub, 'ImgSnagWeChat.exe')), D.MODE_PORTABLE,
+    eq(D.detect_install_mode(os.path.join(sub, 'ImgSnag.exe')), D.MODE_PORTABLE,
        '判据是 exe 自己所在目录（用 cwd 判断会得出相反结论）')
 
     # ---- 挑资产 ----
     info = U.UpdateInfo(ok=True, assets=[
-        U.AssetInfo('ImgSnagWeChat_1.11.0_setup.exe', 'installer', 10, 'u1'),
-        U.AssetInfo('ImgSnagWeChat_1.11.0_portable.zip', 'portable', 10, 'u2'),
+        U.AssetInfo('ImgSnag_1.11.0_setup.exe', 'installer', 10, 'u1'),
+        U.AssetInfo('ImgSnag_1.11.0_portable.zip', 'portable', 10, 'u2'),
     ])
     eq(getattr(D.pick_asset(info, D.MODE_INSTALLER), 'name', None),
-       'ImgSnagWeChat_1.11.0_setup.exe', '安装版挑 setup.exe')
+       'ImgSnag_1.11.0_setup.exe', '安装版挑 setup.exe')
     eq(getattr(D.pick_asset(info, D.MODE_PORTABLE), 'name', None),
-       'ImgSnagWeChat_1.11.0_portable.zip', '便携版挑 portable.zip')
+       'ImgSnag_1.11.0_portable.zip', '便携版挑 portable.zip')
     eq(D.pick_asset(U.UpdateInfo(ok=True, assets=[]), D.MODE_INSTALLER), None,
        '这次没发对应形态的包 → None（界面去提示，不硬塞一个用不上的）')
 
@@ -603,19 +603,19 @@ def test_update_download():
     # ---- 解压便携包 ----
     zgood = os.path.join(tmp, 'good.zip')
     with _zip.ZipFile(zgood, 'w') as z:
-        z.writestr('ImgSnagWeChat/ImgSnagWeChat.exe', b'MZ')
-        z.writestr('ImgSnagWeChat/_internal/a.txt', b'a')
+        z.writestr('ImgSnag/ImgSnag.exe', b'MZ')
+        z.writestr('ImgSnag/_internal/a.txt', b'a')
     out = os.path.join(tmp, 'out')
     exe = D.unpack_portable(zgood, out)
-    eq(os.path.basename(exe), 'ImgSnagWeChat.exe', '解压后能找到主程序')
-    check(os.path.exists(os.path.join(out, 'ImgSnagWeChat', '_internal', 'a.txt')),
+    eq(os.path.basename(exe), 'ImgSnag.exe', '解压后能找到主程序')
+    check(os.path.exists(os.path.join(out, 'ImgSnag', '_internal', 'a.txt')),
           '子目录一并解出来')
 
     # ---- Zip Slip：压缩包想把文件写到目标目录外面 ----
     zbad = os.path.join(tmp, 'bad.zip')
     with _zip.ZipFile(zbad, 'w') as z:
         z.writestr('../evil.txt', b'x')
-        z.writestr('ImgSnagWeChat/ImgSnagWeChat.exe', b'MZ')
+        z.writestr('ImgSnag/ImgSnag.exe', b'MZ')
     try:
         D.unpack_portable(zbad, os.path.join(tmp, 'out_bad'))
         check(False, '越界路径应该被拦住')
@@ -633,7 +633,7 @@ def test_update_download():
         check('损坏' in str(exc), '坏压缩包 → 人话提示重试')
 
     # ---- 便携版解压目录：放程序目录旁边，带版本号，撞名不覆盖 ----
-    app_dir = os.path.join(tmp, 'ImgSnagWeChat')
+    app_dir = os.path.join(tmp, 'ImgSnag')
     os.makedirs(app_dir, exist_ok=True)
     p1 = D.port_dir_for(app_dir, '1.11.0')
     check('1.11.0' in os.path.basename(p1), '解压目录名带版本号')
@@ -642,7 +642,7 @@ def test_update_download():
     os.makedirs(p1)
     p2 = D.port_dir_for(app_dir, '1.11.0')
     check(p2 != p1 and p2.endswith('_2'), '同名已存在 → 另起一个，绝不覆盖上一次的解压结果')
-    eq(D.port_dir_for(p1, '1.11.1'), os.path.join(tmp, 'ImgSnagWeChat_v1.11.1'),
+    eq(D.port_dir_for(p1, '1.11.1'), os.path.join(tmp, 'ImgSnag_v1.11.1'),
        '从新版目录再更新一次，名字不会越叠越长（叠成 _v1.11.0_v1.11.1）')
 
 

@@ -1,6 +1,6 @@
 """
 屏蔽尺寸配置管理器
-存储位置：%APPDATA%/ImgSnagWeChat/blocked_sizes.json
+存储位置：%APPDATA%/ImgSnag/blocked_sizes.json
 
 为什么要有「撤销」：早期只有 add_blocked 一个入口 —— 右键误屏蔽一个尺寸之后，那类图
 从此**静默消失**，既看不到屏蔽了哪些尺寸、也没有任何撤销入口，只能去手改 JSON 文件。
@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 APP_DIR = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")),
-    "ImgSnagWeChat",
+    "ImgSnag",
 )
 CONFIG_PATH = os.path.join(APP_DIR, "blocked_sizes.json")
 

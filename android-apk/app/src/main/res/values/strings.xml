@@ -9,7 +9,7 @@
     <!-- 启动遮罩 -->
     <string name="status_starting">正在启动…</string>
     <string name="status_failed">界面没能启动。可以点「重试」再来一次，或者点「直接抓取」：\n先复制文章链接，它会直接抓图并存进相册。</string>
-    <string name="log_init">准备就绪。\n\n图片会存到相册的 Pictures/ImgSnagWeChat/ 下，一篇一个文件夹。</string>
+    <string name="log_init">准备就绪。\n\n图片会存到相册的 Pictures/ImgSnag/ 下，一篇一个文件夹。</string>
 
     <!-- 兜底抓取（网页起不来时的退路） -->
     <string name="btn_retry">重试</string>

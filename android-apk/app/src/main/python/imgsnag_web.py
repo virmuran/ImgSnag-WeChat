@@ -109,10 +109,13 @@ from web_image_dl import updater                                     # noqa: E40
 from web_image_dl.history_manager import HistoryManager              # noqa: E402
 from web_image_dl.naming import folder_name                          # noqa: E402
 from web_image_dl.sites import get_adapter, supported_names          # noqa: E402
+from web_image_dl.sites.base import (                                # noqa: E402
+    CREDIT_NOTICE, credit_line)
+
 
 APP_LABEL = 'ImgSnag 安卓版'
 
-#: 相册里的子目录名（最终路径 `Pictures/ImgSnagWeChat/<文章文件夹>`）。
+#: 相册里的子目录名（最终路径 `Pictures/ImgSnag/<文章文件夹>`）。
 #: 取值来自同步进来的 `imgsnag.DEFAULT_SUBDIR` —— 只有一处定义。
 #: Java 侧 `Gallery.ALBUM` 必须与它一致，测试钉住这条；不一致的表现是
 #: "图抓到了但相册里没有"，而且两边都不报错（本项目踩过一次的坑）。
@@ -300,8 +303,19 @@ def pretty_time(iso: str) -> str:
     return f'{dt:%Y-%m-%d}'
 
 
+def build_credit(author: str, site: str) -> str:
+    """界面上那行来源说明（带版权提醒）。没有站点信息时给空串，界面据此隐藏。
+
+    与桌面版 `app._refresh_credit` 的拼法**逐字一致** —— 同一个东西在两端
+    长相不同，用户会以为是两个功能。
+    """
+    if not (site or author):
+        return ''
+    return f'{credit_line(author, site)} — {CREDIT_NOTICE}'
+
+
 def title_from_path(path: str) -> str:
-    """从 `Pictures/ImgSnagWeChat/2026-10-06_1133_标题` 里取回标题。
+    """从 `Pictures/ImgSnag/2026-10-06_1133_标题` 里取回标题。
 
     历史库里没有标题列，而文件夹名本来就是 `日期_时分秒_标题` ——
     标题就在里面，比给共享的数据库加一列划算。
@@ -520,6 +534,10 @@ class Engine:
         self.message = ''
         self.title = ''
         self.folder = ''
+        #: 来源署名与站点界面名。两样都取不到时 build_credit 给空串，
+        #: 界面就把那行藏起来 —— 宁可不显示，也不显示一个编出来的名字。
+        self.author = ''
+        self.site = ''
         self.source = ''
         self.is_url = True
         self.sid = ''
@@ -553,6 +571,7 @@ class Engine:
                 'phase': self.phase,
                 'message': self.message,
                 'title': self.title,
+                'credit': build_credit(self.author, self.site),
                 'folder': self.folder,
                 'source': self.source,
                 'sid': self.sid,
@@ -648,7 +667,10 @@ class Engine:
                 except Exception as e:                              # noqa: BLE001
                     return self._fail('打开文章失败：'
                                       + imgsnag_android.polish(str(e)))
-                self._headers = imgsnag.build_headers(source)
+                # ⚠ Referer 由**站点自己**决定，别想当然地用页面地址：
+                # cosmeitu 的 ciyuandao 图床是「带了就 403」，整批一张都下不来。
+                self._headers = imgsnag.build_headers(
+                    adapter.download_referer(source))
             else:
                 # 粘的是源码：历史里不能把整页 HTML 塞进 URL 列，压成一个短标记
                 self.source = 'html:' + hashlib.md5(source.encode('utf-8')).hexdigest()[:12]
@@ -656,6 +678,7 @@ class Engine:
                 self._headers = imgsnag.build_headers('')
 
             title = adapter.extract_title(html)
+            author = adapter.extract_author(html)
             urls = adapter.extract(html, include_scripts=False)
             if not urls and is_url:
                 self.log_line('正文里没直接看到图，补扫 <script> 再找一遍…')
@@ -671,12 +694,14 @@ class Engine:
             title_ok = title or adapter.fallback_title
             folder = folder_name(title, when=self.when(),
                                  fallback=adapter.fallback_title)
-            self._write_session(sid, title, folder, items, adapter)
+            self._write_session(sid, title, folder, items, adapter, author)
 
             with self.lock:
                 self.items = items
                 self.sid = sid
                 self.title = title_ok
+                self.author = author
+                self.site = adapter.display_name
                 self.folder = folder
                 self.phase = 'ready'
                 self.message = f'找到 {len(items)} 张图'
@@ -763,7 +788,8 @@ class Engine:
             self.message = imgsnag_android.polish(message)
         self.log_line('失败：' + (message or '').split('\n')[0])
 
-    def _write_session(self, sid: str, title: str, folder: str, items, adapter):
+    def _write_session(self, sid: str, title: str, folder: str, items, adapter,
+                       author: str = ''):
         """落一份 session.json —— 历史里"点开这一次"全靠它恢复。
 
         **必须存下每张图的地址**：不然"打开上次那篇"就只剩一排空壳，
@@ -779,6 +805,9 @@ class Engine:
             'title': title,
             'folder': folder,
             'adapter': adapter.name,
+            #: 来源署名。历史里「再打开一次」时要靠它把界面那行提示补回来
+            #: （老会话没有这个键，读的时候按空串处理）。
+            'author': author,
             'when': datetime.now().isoformat(),
             'items': [it.to_json() for it in items],
         }
@@ -1036,12 +1065,20 @@ class Engine:
             self.sid = sid
             self.title = data.get('title') or title_from_path(row.save_path) or '（无标题）'
             self.folder = folder
+            self.author = (data.get('author') or '').strip()
             self.items = items
             self.entry_id = row.id
             self.phase = 'ready'
             self.message = f'已载入上次保存的 {len(items)} 张图'
+            # 同上：Referer 得问站点，不能拿页面地址硬当。
+            # 这里用**严格**的 get_adapter（认不出就不带），不用宽松的
+            # resolve_adapter —— 宽松版会把认不出来的站点当成默认站点，
+            # 那样界面会显示一个错的站点名。
             if self.is_url:
-                self._headers = imgsnag.build_headers(self.source)
+                ad = get_adapter(self.source)
+                self.site = ad.display_name if ad else ''
+                self._headers = imgsnag.build_headers(
+                    ad.download_referer(self.source) if ad else '')
         self.log_line(f'载入历史会话 {sid}（{len(items)} 张）')
         return {'ok': True, 'count': len(items), 'title': self.title}
 

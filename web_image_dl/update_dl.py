@@ -47,7 +47,7 @@ MODE_PORTABLE = "portable"
 UNINSTALLER_NAME = "unins000.exe"
 
 #: 程序主文件名（在解压出来的便携包里找它）
-APP_EXE_NAME = "ImgSnagWeChat.exe"
+APP_EXE_NAME = "ImgSnag.exe"
 
 DOWNLOAD_CHUNK = 64 * 1024
 #: (连接超时, 读取超时)。连接可以短，**读取必须给足** —— 30MB 的包在慢网络上
@@ -112,12 +112,12 @@ def app_dir(executable: str | None = None) -> str:
 def update_dir() -> str:
     """下载暂存目录。
 
-    放用户目录（`~/.imgsnag_wechat/update`）而**不是程序目录**：
+    放用户目录（`~/.imgsnag/update`）而**不是程序目录**：
     · 安装版装在 Program Files，普通权限写不进去；
     · 便携版可能躺在 U 盘或只读共享盘上。
     和下载历史库同一个用户目录，卸载不删（用户自己的东西不替他清）。
     """
-    d = os.path.join(os.path.expanduser("~"), ".imgsnag_wechat", "update")
+    d = os.path.join(os.path.expanduser("~"), ".imgsnag", "update")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -230,7 +230,7 @@ def _default_opener(url: str, timeout):
     kwargs = {
         "stream": True,
         "timeout": timeout,
-        "headers": {"User-Agent": f"ImgSnag-WeChat/{LOCAL_VERSION or 'dev'}"},
+        "headers": {"User-Agent": f"ImgSnag/{LOCAL_VERSION or 'dev'}"},
     }
     bundle = system_ca_bundle()
     if bundle:
@@ -347,7 +347,7 @@ def unpack_portable(zip_path: str, dest_root: str) -> str:
 
 
 def find_executable(root: str) -> str:
-    """在解压结果里找主程序（便携包顶层是 `ImgSnagWeChat/`，主程序在其下）"""
+    """在解压结果里找主程序（便携包顶层是 `ImgSnag/`，主程序在其下）"""
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
             if fn.lower() == APP_EXE_NAME.lower():
@@ -364,7 +364,7 @@ def port_dir_for(near_dir: str, version: str) -> str:
 
     为什么放在**程序目录旁边**而不是下载目录：
     用户得自己找过去，而且多半已经忘了当初把程序解压到哪了。放在旧目录旁边，
-    两个文件夹一眼对得上（`ImgSnagWeChat` 与 `ImgSnagWeChat_v1.11.2`），
+    两个文件夹一眼对得上（`ImgSnag` 与 `ImgSnag_v1.11.2`），
     替换时才不会左右为难。传进来的是**程序目录本身**，新版落在它的上一级。
 
     同名已存在时退到 `_2`/`_3`（与图库命名同款做法），绝不覆盖上一次的解压结果。
@@ -372,7 +372,7 @@ def port_dir_for(near_dir: str, version: str) -> str:
     near = os.path.abspath(near_dir) if near_dir else update_dir()
     parent = os.path.dirname(near) or near
     base = re.sub(r"[\\/:*?\"<>|]+", "_", os.path.basename(near)).strip(" .")
-    base = re.sub(r"_v\d+(?:\.\d+)*$", "", base) or "ImgSnagWeChat"   # 别把版本号越叠越长
+    base = re.sub(r"_v\d+(?:\.\d+)*$", "", base) or "ImgSnag"   # 别把版本号越叠越长
     stem = f"{base}_v{version}" if version else f"{base}_new"
     candidate = os.path.join(parent, stem)
     n = 2

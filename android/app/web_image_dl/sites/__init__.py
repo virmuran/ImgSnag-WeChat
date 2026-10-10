@@ -23,10 +23,16 @@
 """
 from .base import SiteAdapter   # noqa: F401  （对外导出，供新增站点时继承）
 from .weixin import weixin
+from .cosmeitu import cosmeitu
 
-#: 注册表。顺序 = 特征打分的平手判定顺序，也是「认不出时退回谁」的依据
+#: 注册表。顺序 = 特征打分的平手判定顺序，也是「认不出时退回谁」的依据。
+#:
+#: ⚠ **微信必须留在第一位**：`resolve_adapter` 在 HTML 认不出归属时退回 `ADAPTERS[0]`，
+#: 而"粘贴源码"这个场景绝大多数是公众号文章（改造前的历史行为）。
+#: 新站点往**后面**加。
 ADAPTERS = [
     weixin,
+    cosmeitu,
 ]
 
 

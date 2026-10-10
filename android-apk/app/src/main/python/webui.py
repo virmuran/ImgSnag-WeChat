@@ -154,6 +154,8 @@ input::placeholder{color:var(--sub)}
 @keyframes slide{from{transform:translateX(-100%)}to{transform:translateX(340%)}}
 #bar2.det i{width:0; animation:none; transition:width .25s}
 #checkLine{font-size:12.5px; color:var(--sub); margin:8px 0 0}
+#creditLine{font-size:12.5px; color:var(--sub); margin:10px 0 0;
+  line-height:1.5; word-break:break-word}
 
 /* ── 缩略图网格 ── */
 #grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:7px;
@@ -316,6 +318,7 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
   <!-- 结果 -->
   <section id="view-result" hidden>
     <div id="status"></div>
+    <p id="creditLine" hidden></p>
     <div id="bar2" hidden><i></i></div>
     <p id="checkLine" hidden></p>
     <div id="grid"></div>
@@ -922,6 +925,16 @@ function applyState(s){
     : (p === 'saved' ? 'ok' : (p === 'ready' ? '' : 'busy')));
   if (p !== 'idle'){
     status.textContent = s.message || '';
+  }
+
+  // 来源与版权提示：解析出来之后一直显示，换一篇文章就跟着换。
+  // 取不到站点信息时后端给空串，这里就把整行藏起来。
+  var credit = $('#creditLine');
+  if (p !== 'idle' && s.credit){
+    credit.textContent = s.credit;
+    credit.hidden = false;
+  } else {
+    credit.hidden = true;
   }
 
   var bar = $('#bar2');

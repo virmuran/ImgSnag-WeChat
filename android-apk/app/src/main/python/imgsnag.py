@@ -48,6 +48,9 @@ if _HERE not in sys.path:
 
 from web_image_dl.naming import folder_name, unique_dir          # noqa: E402
 from web_image_dl.sites import get_adapter, supported_names      # noqa: E402
+from web_image_dl.sites.base import (                            # noqa: E402
+    CREDIT_FILE, CREDIT_NOTICE, credit_line)
+
 
 APP_NAME = 'ImgSnag Termux'
 APP_VERSION = '1.0'
@@ -63,7 +66,7 @@ HEADERS = {
 MIN_IMAGE_BYTES = 500
 
 #: 手机相册目录下给本工具用的子文件夹名
-DEFAULT_SUBDIR = 'ImgSnagWeChat'
+DEFAULT_SUBDIR = 'ImgSnag'
 
 #: 从「分享」文本里抠链接。微信分享出来常常是「标题 + 换行 + 链接」，
 #: 所以不能假设整段就是 URL。右侧字符类要排除中文标点与各种括号，
@@ -125,7 +128,7 @@ def default_out_dir() -> str:
     """决定默认保存到哪儿。三级回退，顺序即优先级：
 
       1. 环境变量 `IMGSNAG_OUT` —— 给愿意自己定路径的人留的口子
-      2. 手机内部存储 `Pictures/ImgSnagWeChat/` —— 相册能扫到，**正常走这条**
+      2. 手机内部存储 `Pictures/ImgSnag/` —— 相册能扫到，**正常走这条**
       3. `~/imgsnag_downloads/` —— 没授权存储权限时的退路（在 Termux 私有目录里，
          相册看不到，需要文件管理器手动翻）
     """
@@ -164,7 +167,12 @@ def make_get(insecure: bool = False):
 
 
 def build_headers(referer: str = '') -> dict:
-    """构造请求头。下载图片时带上文章地址作 Referer —— 图片 CDN 可能校验它。"""
+    """构造请求头。Referer 由**站点适配器**给出（SiteAdapter.download_referer）。
+
+    大部分图床需要它校验来源页，但 cosmeitu 的 ciyuandao 正相反 —— 阿里云 OSS
+    的防盗链被配成「带了 Referer 就拒」，带上反而整批图全 403。所以这个值不写死，
+    由调用方从适配器取；**空串表示不带这个头**。
+    """
     h = dict(HEADERS)
     if referer:
         h['Referer'] = referer
@@ -273,6 +281,23 @@ def clipboard_text() -> str:
 #  主流程
 # ============================================================================
 
+def write_credit_file(folder: str, line: str) -> bool:
+    """在批次目录里落一份来源说明 —— 图离开这个软件之后也还带着出处。
+
+    扩展名是 .txt，图库浏览只认图片扩展名，所以它不会混进图里。
+    写不进去（目录只读之类）只是少一个说明文件，**绝不该让整次抓取失败**。
+    """
+    if not folder or not line:
+        return False
+    try:
+        with open(os.path.join(folder, CREDIT_FILE),
+                  'w', encoding='utf-8') as f:
+            f.write(f'{line}\n\n{CREDIT_NOTICE}\n')
+        return True
+    except OSError:
+        return False
+
+
 @dataclass
 class Result:
     """一次抓取的结果。给调用方（和测试）用的结构化返回值，取代"只看打印"。"""
@@ -283,6 +308,10 @@ class Result:
     skipped: int = 0                              # 下载失败 + 去重丢掉的张数
     title: str = ''
     message: str = ''                             # 没成功时的人类可读说明
+    #: 来源署名与一句话来源说明。取不到署名**不是错误** —— 这时 credit
+    #: 退化成「来源：<站点名>」，界面如实标出来即可，绝不编造一个名字。
+    author: str = ''
+    credit: str = ''
 
     @property
     def ok(self) -> bool:
@@ -290,12 +319,18 @@ class Result:
 
 
 def snag(source, is_url=True, out_root=None, include_scripts=False,
-         get=None, dry_run=False, log=print, adapter=None, when=None):
+         get=None, dry_run=False, log=print, adapter=None, when=None,
+         credit_file=True):
     """完整流程：拿到 HTML → 提取图片 → 按档位下载 → 去重 → 落盘。
 
     所有会碰网络/文件系统的步骤都通过参数注入（`get` / `out_root` / `when`），
     所以测试可以在完全不联网、不写用户目录的前提下跑完整条链路 ——
     这比"只测几个纯函数"有价值得多：出问题的往往正是它们连接的接缝处。
+
+    `credit_file=False` 给 **APK** 用：那边落盘的中转目录会被 Java
+    **原样**搬进系统相册（`Gallery.publishDir` 只按扩展名跳过 .part），
+    塞一个 .txt 进去会被当成 image/jpeg 收下 —— 相册里多一个打不开的
+    "图"，成功张数还会多算一张。桌面版与 Termux 版照常写。
     """
     log = log or (lambda *a, **k: None)
     get = get or make_get()
@@ -314,20 +349,22 @@ def snag(source, is_url=True, out_root=None, include_scripts=False,
             if 'CERTIFICATE_VERIFY_FAILED' in str(e) or 'SSL' in str(e):
                 msg += '\n（像是证书/网络问题，可加 --insecure 重试）'
             return Result(message=msg)
-        headers = build_headers(source)
+        headers = build_headers(adapter.download_referer(source))
     else:
         log('从 HTML 源码解析…')
         html = source
-        headers = build_headers('')
+        headers = build_headers('')      # 粘贴源码时没有来源页，本就不该带
 
-    # ② 标题与图片列表
+    # ② 标题、来源署名与图片列表
     title = adapter.extract_title(html)
+    author = adapter.extract_author(html)
+    credit = credit_line(author, adapter.display_name)
     urls = adapter.extract(html, include_scripts=include_scripts)
     log(f'标题：{title or adapter.fallback_title}')
     log(f'找到 {len(urls)} 张图')
 
     if not urls:
-        return Result(title=title, message=(
+        return Result(title=title, author=author, credit=credit, message=(
             '这篇文章里没找到图片。\n'
             '可能原因：文章确实没图 / 页面要求登录才能看 / '
             '图藏在脚本里（加 --scripts 再试一次）。'))
@@ -336,7 +373,8 @@ def snag(source, is_url=True, out_root=None, include_scripts=False,
         for i, u in enumerate(urls, 1):
             log(f'  {i:>3}. {u}')
         log(f'\n（仅列出，未下载。共 {len(urls)} 张）')
-        return Result(title=title, total=len(urls))
+        return Result(title=title, total=len(urls),
+                      author=author, credit=credit)
 
     # ③ 建目录（用适配器的兜底名，保证标题为空也有合法目录名）
     out_root = out_root or default_out_dir()
@@ -369,6 +407,8 @@ def snag(source, is_url=True, out_root=None, include_scripts=False,
 
     skipped = (len(urls) - len(saved))
     if saved:
+        if credit_file:
+            write_credit_file(folder, credit)
         rescan_dir(folder)
 
     # 一张都没存下来时，把目录收掉 —— 留个空文件夹比报错更让人困惑
@@ -380,6 +420,7 @@ def snag(source, is_url=True, out_root=None, include_scripts=False,
 
     return Result(folder=folder, saved=saved, total=len(urls),
                   total_bytes=total_bytes, skipped=skipped, title=title,
+                  author=author, credit=credit,
                   message='' if saved else '一张图都没下下来（网络问题？可重试一次）')
 
 
@@ -396,7 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('source', nargs='?',
                    help='文章链接（也接受含链接的整段分享文本；直接粘 HTML 源码也行）')
     p.add_argument('--html', metavar='文件', help='从本地 HTML 文件解析')
-    p.add_argument('--out', metavar='目录', help='保存到指定目录（默认：相册/Pictures/ImgSnagWeChat）')
+    p.add_argument('--out', metavar='目录', help='保存到指定目录（默认：相册/Pictures/ImgSnag）')
     p.add_argument('--list', dest='dry_run', action='store_true',
                    help='只列出会下载哪些图，不实际下载')
     p.add_argument('--scripts', dest='include_scripts', action='store_true',
@@ -454,6 +495,8 @@ def main(argv=None) -> int:
     print(f'\n✅ 完成：{len(res.saved)} 张，共 {human_size(res.total_bytes)}')
     if res.skipped:
         print(f'   跳过 {res.skipped} 张（重复或下载失败）')
+    if res.credit:
+        print(f'🔗 {res.credit}')
     print(f'📁 {res.folder}')
     if not shutil.which('termux-media-scan'):
         print('   （相册里没看到的话，等一会儿或重启相册；'

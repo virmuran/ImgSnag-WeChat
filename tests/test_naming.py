@@ -186,7 +186,7 @@ def test_folder_name_always_legal():
 
 def test_folder_name_for_path_budget():
     print('\n[NAME-8] 按父目录长度反推标题预算（守住 260 上限）')
-    short_parent = r'C:\Users\Administrator\Pictures\ImgSnagWeChat'
+    short_parent = r'C:\Users\Administrator\Pictures\ImgSnag'
     nm = folder_name_for(short_parent, '标题' * 30, DT)
     eq(nm, '2026-09-18_164633_' + '标题' * 12, '父目录短时用满 24 字')
     full = os.path.join(short_parent, nm)
