@@ -154,6 +154,17 @@ def main():
 
     app = QApplication.instance() or QApplication([])
 
+    # 配置指到临时目录：截图过程要 resize 窗口、切排序、动开关，收尾 close() 时
+    # 这些都会**落盘**。不隔离的话跑一次这个工具就把界面偏好改掉了
+    # （窗口大小、排序、保存格式全变成截图时的状态），是最不容易察觉的那种副作用。
+    from web_image_dl.settings import K_CLOSE_ACTION, settings as _settings
+    _settings.use_ini_file(os.path.join(
+        tempfile.mkdtemp(prefix='imgsnag_shot_cfg_'), 'settings.ini'))
+    # 关闭行为必须一并定死：隔离后它回到出厂默认「每次询问」，收尾 win.close()
+    # 会弹 CloseChoiceDialog 并 exec() —— 离屏下永久阻塞且不报错（工具表现是
+    # 13 张图全拍完了进程却不退出，前台跑 120 秒必被掐断）。测试那边同款教训。
+    _settings.set(K_CLOSE_ACTION, 'quit')
+
     from web_image_dl.app import ImageDownloaderApp
     import web_image_dl.app as app_mod
 
@@ -282,6 +293,15 @@ def main():
     QApplication.processEvents()
     shot(win, os.path.join(outdir, '12_历史批次在软件里打开.png'),
          '只读浏览：图从磁盘读回来，下载按钮禁用并说明原因')
+
+    # ---- 13. 侧边栏「设置」页（v2.1.0：低频项收拢，图库位置终于有入口） ----
+    win.resize(1100, 750)
+    win._switch_page(2)
+    win.status.clearMessage()      # 前一个镜头留在状态栏的文字别带进来
+    QApplication.processEvents()
+    shot(win, os.path.join(outdir, '13_设置页.png'),
+         '图库保存位置 / 关闭窗口时 / 版本更新 —— 这三项此前散在托盘右键菜单、'
+         '关于对话框里，图库位置更是只能改注册表')
 
     win.close()
     print('完成')

@@ -1,6 +1,6 @@
 """
-ImageDownloaderApp — 主窗口（微信公众号专精版）
-布局：左侧图标侧边栏 + QStackedWidget（解析页 / 历史页）
+ImageDownloaderApp — 主窗口
+布局：左侧图标侧边栏 + QStackedWidget（解析页 / 历史页 / 设置页）
 """
 import os
 import re
@@ -78,8 +78,8 @@ class _UpdateCheckThread(QThread):
 #: 「关于」对话框正文。写成常量便于测试比对，也免得 HTML 和逻辑混在一起。
 ABOUT_HTML = f"""
 <p style="margin-top:0"><b>这个程序做什么</b><br>
-只做一件事：把公众号文章正文里的图按原图画质抓下来。纯 requests 抓取，
-不需要浏览器内核，安装包 30 MB。</p>
+只做一件事：把文章正文里的图按原图画质抓下来。纯 requests 抓取，
+不需要浏览器内核。</p>
 
 <p><b>你的数据在哪</b><br>
 · 下载历史：<code>~/.imgsnag/history.db</code><br>
@@ -87,11 +87,14 @@ ABOUT_HTML = f"""
 · 界面偏好：注册表 <code>HKCU\\Software\\ImgSnag</code><br>
 程序不收集任何信息、不上报任何数据。对外的联网只有两处 ——
 「检查更新」与你主动点的「下载更新」，都访问 GitHub；不想被自动检查打扰
-可以在下方关掉（手动点的那两次仍会联网）。</p>
+可以在侧边栏「设置」页里关掉（手动点的那两次仍会联网）。</p>
 
 <p><b>源码与反馈</b><br>
 <a href="{SOURCE_URL}">{SOURCE_URL.replace('https://', '')}</a><br>
 解析不出来的文章、漏过的噪音图，欢迎提 Issue 并附文章链接。</p>
+
+<p><b>开源许可</b><br>
+本项目基于 <b>MIT 许可证</b>开源，可自由使用、修改与分发。</p>
 
 <p><b>第三方依赖</b><br>
 · PySide6 —— LGPLv3（Qt for Python）<br>
@@ -192,6 +195,10 @@ class ImageDownloaderApp(QMainWindow):
         self._tray: QSystemTrayIcon | None = None
         #: 托盘右键菜单要长期持有 —— PySide6 里 wrapper 一被回收就连带删掉底层 C++ 对象
         self._tray_menu: QMenu | None = None
+        #: 托盘菜单「关闭窗口时」那一组的勾选项 / 动作组。菜单可能建不起来（无托盘环境），
+        #: 所以容器在这里先备好 —— 设置页改关闭行为时也要同步它，不能假定菜单一定存在。
+        self._close_actions: dict = {}
+        self._close_group: QActionGroup | None = None
         self._close_actions: dict = {}
         #: True = 本次关闭是真退出，不再走托盘逻辑（托盘菜单「退出」等入口会先置位）
         self._really_quit = False
@@ -230,8 +237,10 @@ class ImageDownloaderApp(QMainWindow):
         self.stack = QStackedWidget()
         self.parse_page = self._build_parse_page()
         self.history_page = self._build_history_page()
+        self.settings_page = self._build_settings_page()
         self.stack.addWidget(self.parse_page)
         self.stack.addWidget(self.history_page)
+        self.stack.addWidget(self.settings_page)
         h_root.addWidget(self.stack, 1)
 
         # 预览缩放快捷键（配合 Ctrl+滚轮 / 双击，用于 100% 查验是不是真原图）
@@ -263,6 +272,11 @@ class ImageDownloaderApp(QMainWindow):
         self.btn_history.setToolTip("查看解析与下载记录")
         self.btn_history.clicked.connect(lambda: self._switch_page(1))
         layout.addWidget(self.btn_history)
+
+        self.btn_settings = SidebarButton("设置", "⚙")
+        self.btn_settings.setToolTip("图库保存位置、关闭行为、版本更新")
+        self.btn_settings.clicked.connect(lambda: self._switch_page(2))
+        layout.addWidget(self.btn_settings)
 
         layout.addStretch()
 
@@ -761,6 +775,153 @@ class ImageDownloaderApp(QMainWindow):
         self._refresh_blocked()
         self.status.showMessage(f"已恢复 {n} 条屏蔽，本页放回 {back} 张")
 
+    # ================================================================
+    #  设置页
+    # ================================================================
+
+    def _settings_card(self, title: str, desc: str = ""):
+        """设置页里的一张分组卡片 —— 返回 (卡片控件, 往里加内容的布局)"""
+        card = QFrame()
+        card.setObjectName("settingsCard")
+        card.setStyleSheet(
+            "#settingsCard { background: #fafafa; border: 1px solid #ececec;"
+            " border-radius: 8px; }"
+        )
+        box = QVBoxLayout(card)
+        box.setContentsMargins(16, 12, 16, 14)
+        box.setSpacing(8)
+
+        head = QLabel(title)
+        head.setStyleSheet("font-size: 13px; font-weight: bold; color: #333; border: none;")
+        box.addWidget(head)
+        if desc:
+            sub = QLabel(desc)
+            sub.setWordWrap(True)
+            sub.setStyleSheet("font-size: 11px; color: #999; border: none;")
+            box.addWidget(sub)
+        return card, box
+
+    def _build_settings_page(self):
+        """设置页 —— 收拢那些一直没处可去 / 藏得很深的偏好。
+
+        之前这些选项的入口是散的：图库保存位置**根本没有界面入口**（只能改注册表），
+        「关闭窗口时」只在托盘右键菜单里，「启动后自动检查新版本」塞在关于对话框底部。
+        它们都是"设一次就不动"的低频项，单独给一页最合适 —— 解析页的动作栏里
+        一个控件都不动（那是高频区，也是整窗宽度的瓶颈）。
+        """
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        title = QLabel("设置")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #333;")
+        root.addWidget(title)
+
+        # ---- 图库保存位置 ----
+        card, box = self._settings_card(
+            "图库保存位置", "下载的图存到这里，每篇文章一个子文件夹")
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
+        self.library_path_label = QLabel("")
+        self.library_path_label.setWordWrap(True)
+        self.library_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.library_path_label.setStyleSheet("font-size: 12px; color: #333; border: none;")
+        path_row.addWidget(self.library_path_label, 1)
+
+        self.library_change_btn = QPushButton("更改…")
+        self.library_change_btn.setToolTip("挑一个目录作为图库根目录")
+        self.library_change_btn.clicked.connect(self._on_change_library_dir)
+        path_row.addWidget(self.library_change_btn)
+
+        self.library_reset_btn = QPushButton("恢复默认")
+        self.library_reset_btn.setToolTip("改回系统「图片」文件夹下的 ImgSnag")
+        self.library_reset_btn.clicked.connect(self._on_reset_library_dir)
+        path_row.addWidget(self.library_reset_btn)
+        box.addLayout(path_row)
+        root.addWidget(card)
+
+        # ---- 关闭窗口时 ----
+        card, box = self._settings_card(
+            "关闭窗口时", "点右上角 × 时的行为，托盘右键菜单里也能改")
+        self.close_combo = QComboBox()
+        for key, label in self.CLOSE_LABELS:
+            self.close_combo.addItem(label, key)
+        self.close_combo.setMinimumWidth(150)
+        self.close_combo.currentIndexChanged.connect(self._on_close_combo_changed)
+        row = QHBoxLayout()
+        row.addWidget(self.close_combo)
+        row.addStretch()
+        box.addLayout(row)
+        root.addWidget(card)
+
+        # ---- 版本更新 ----
+        card, box = self._settings_card("版本更新", "最多 6 小时查一次，不会频繁联网")
+        self.auto_update_cb = QCheckBox("启动后自动检查新版本")
+        self.auto_update_cb.setToolTip("关掉之后程序不再主动联网，仍可随时点「检查更新」")
+        self.auto_update_cb.toggled.connect(
+            lambda v: self.settings.set(K_AUTO_CHECK_UPDATE, bool(v)))
+        box.addWidget(self.auto_update_cb)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        check_btn = QPushButton("检查更新")
+        check_btn.clicked.connect(lambda: self._check_updates(silent=False))
+        row.addWidget(check_btn)
+        about_btn = QPushButton("关于 ImgSnag")
+        about_btn.setToolTip("版本号、数据存在哪、第三方依赖与免责声明")
+        about_btn.clicked.connect(self._show_about)
+        row.addWidget(about_btn)
+        box.addLayout(row)
+        root.addWidget(card)
+
+        root.addStretch()
+        return page
+
+    def _refresh_settings_page(self):
+        """把设置页上的控件同步成当前生效的值（进页面时 / 改完之后都走这里）"""
+        configured = (self.settings.get(K_LIBRARY_DIR) or "").strip()
+        self.library_path_label.setText(self._library_root())
+        # 本来就在默认位置时，「恢复默认」没有意义 —— 置灰比点了没反应清楚
+        self.library_reset_btn.setEnabled(bool(configured))
+
+        idx = self.close_combo.findData(self._resolve_close_action())
+        if idx >= 0 and idx != self.close_combo.currentIndex():
+            self.close_combo.blockSignals(True)
+            self.close_combo.setCurrentIndex(idx)
+            self.close_combo.blockSignals(False)
+
+        self.auto_update_cb.blockSignals(True)
+        self.auto_update_cb.setChecked(bool(self.settings.get(K_AUTO_CHECK_UPDATE)))
+        self.auto_update_cb.blockSignals(False)
+
+    def _on_change_library_dir(self):
+        """换图库根目录。
+
+        ⚠ 离屏（offscreen）测试下 QFileDialog 会永久阻塞且不报错 ——
+        用例里请直接调 `_on_reset_library_dir()` 或自己写 settings。
+        """
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择图库保存位置", self._library_root())
+        if not folder:
+            return
+        self.settings.set(K_LIBRARY_DIR, folder)
+        self.settings.sync()
+        self._refresh_settings_page()
+        self.status.showMessage(f"图库位置已改为：{folder}")
+
+    def _on_reset_library_dir(self):
+        """清掉自定义路径，回到系统「图片」下的 ImgSnag"""
+        self.settings.set(K_LIBRARY_DIR, "")
+        self.settings.sync()
+        self._refresh_settings_page()
+        self.status.showMessage("图库位置已恢复默认")
+
+    def _on_close_combo_changed(self, index):
+        if index < 0:
+            return
+        self._set_close_action(self.close_combo.itemData(index))
+
     def _apply_style(self):
         self.setStyleSheet("""
             QMainWindow { background: #ffffff; }
@@ -957,7 +1118,7 @@ class ImageDownloaderApp(QMainWindow):
         return action if action in dict(self.CLOSE_LABELS) else "ask"
 
     def _set_close_action(self, action) -> bool:
-        """写入关闭行为偏好，并同步托盘菜单里的勾选"""
+        """写入关闭行为偏好，并同步托盘菜单与设置页里的勾选"""
         if action not in dict(self.CLOSE_LABELS):
             return False
         self.settings.set(K_CLOSE_ACTION, action)
@@ -965,6 +1126,13 @@ class ImageDownloaderApp(QMainWindow):
         act = self._close_actions.get(action)
         if act is not None and not act.isChecked():
             act.setChecked(True)
+        combo = getattr(self, "close_combo", None)
+        if combo is not None:
+            idx = combo.findData(action)
+            if idx >= 0 and idx != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
         return True
 
     def _ask_close_action(self):
@@ -984,9 +1152,12 @@ class ImageDownloaderApp(QMainWindow):
         self.stack.setCurrentIndex(index)
         self.btn_parse.setChecked(index == 0)
         self.btn_history.setChecked(index == 1)
+        self.btn_settings.setChecked(index == 2)
         if index == 1:
             self._refresh_history()
             self._refresh_blocked()
+        elif index == 2:
+            self._refresh_settings_page()
 
     # ================================================================
     #  解析页核心逻辑
@@ -1913,11 +2084,11 @@ class ImageDownloaderApp(QMainWindow):
     # ================================================================
 
     def _show_about(self):
-        """关于对话框 —— 侧边栏点版本号进来。
+        """关于对话框 —— 侧边栏点版本号进来，或设置页里的「关于 ImgSnag」按钮。
 
         只放用户真会看的内容：这是什么、我的数据在哪、怎么反馈、依赖了谁的代码。
-        第三方依赖许可如实列出；本项目仓库未附 LICENSE 文件，所以这里不声称
-        任何开源许可（写了才是造假）。
+        本项目以 MIT 许可证开源，第三方依赖的许可也如实列出。
+        设置项不在这里 —— 统一收在侧边栏「设置」页。
         """
         dlg = QDialog(self)
         dlg.setWindowTitle("关于 ImgSnag")
@@ -1941,12 +2112,8 @@ class ImageDownloaderApp(QMainWindow):
         browser.setHtml(ABOUT_HTML)
         box.addWidget(browser, 1)
 
-        auto_cb = QCheckBox("启动后自动检查新版本（最多 6 小时查一次）")
-        auto_cb.setToolTip("关掉之后程序不再主动联网（仍可随时点「检查更新」手动查一次）")
-        auto_cb.setChecked(bool(self.settings.get(K_AUTO_CHECK_UPDATE)))
-        auto_cb.toggled.connect(lambda v: self.settings.set(K_AUTO_CHECK_UPDATE, bool(v)))
-        box.addWidget(auto_cb)
-
+        # 「启动后自动检查新版本」开关已搬到侧边栏「设置」页 —— 那是偏好该待的地方。
+        # 关于对话框只留「这是什么 / 数据在哪 / 依赖谁的代码」和两个按钮。
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 

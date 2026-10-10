@@ -1284,11 +1284,7 @@ def test_about_and_update(app):
             seen['labels'] = [c.text() for c in w.findChildren(QLabel)]
             seen['html'] = ''.join(c.toHtml() for c in w.findChildren(QTextBrowser))
             seen['buttons'] = [c.text() for c in w.findChildren(QPushButton)]
-            checks = w.findChildren(QCheckBox)
-            seen['check_texts'] = [c.text() for c in checks]
-            seen['auto_checked'] = checks[0].isChecked() if checks else None
-            if checks:
-                checks[0].setChecked(False)       # 真实链路：toggled → 写设置
+            seen['check_texts'] = [c.text() for c in w.findChildren(QCheckBox)]
 
         _grab_and_close_dialog('关于 ImgSnag', grab_about)
         win._show_about()                          # 点标签走的就是这个方法
@@ -1308,11 +1304,11 @@ def test_about_and_update(app):
               '再写「唯一」就是假话）')
         check('检查更新' in seen.get('buttons', []), '对话框里有「检查更新」按钮')
         check('关闭' in seen.get('buttons', []), '对话框里有「关闭」按钮')
-        check(any('自动检查' in t for t in seen.get('check_texts', [])),
-              '有「启动后自动检查新版本」开关')
-        eq(seen.get('auto_checked'), True, '开关默认是勾上的')
-        eq(settings.get(K_AUTO_CHECK_UPDATE), False,
-           '在对话框里取消勾选会真的写进设置（不是个摆设）')
+        # 关于对话框里不再放设置开关 —— 「启动后自动检查新版本」已统一收进侧边栏
+        # 「设置」页（那边由 UI-30 钉住）。这里反过来钉：别又塞回来，同一个开关
+        # 两处可改的话，用户看到的是哪个生效全凭运气。
+        eq(seen.get('check_texts'), [],
+           '关于对话框里不再有设置开关（自动检查已搬到「设置」页）')
         settings.set(K_AUTO_CHECK_UPDATE, True)
 
         # ---- c) 6 小时节流与开关（用 spy 替掉真检查，避免起线程） ----
@@ -2285,6 +2281,88 @@ def test_update_wizard(app):
             update_dl.app_dir = orig_app_dir
 
 
+def test_settings_page(app):
+    """侧边栏「设置」页（v2.1.0）。
+
+    这页是为了收拢三样此前没有正经入口的东西：
+    a) 图库保存位置 —— **以前根本没有界面入口**，只能改注册表
+       HKCU\\Software\\ImgSnag\\io/library_dir（K_LIBRARY_DIR 全项目只有读、没有写）。
+       这里钉住「改得了、改完立刻生效、回得去默认」。
+    b) 关闭窗口时 —— 以前只在托盘右键菜单里，现在两处都能改，必须双向同步。
+    c) 启动后自动检查新版本 —— 从关于对话框底部搬过来，钉住它真的写得进设置。
+
+    ⚠ 「更改…」按钮走的是 QFileDialog.getExistingDirectory()，离屏下会永久阻塞，
+    所以这里只改设置 + 调 _refresh_settings_page() 模拟「用户选完了」，不点那个按钮。
+    """
+    from web_image_dl.app import ImageDownloaderApp
+    from web_image_dl.settings import (
+        K_AUTO_CHECK_UPDATE, K_CLOSE_ACTION, K_LIBRARY_DIR, settings,
+    )
+
+    print('\n[UI-30] 侧边栏「设置」页：图库位置 / 关闭行为 / 版本更新')
+
+    with _isolated_config():
+        win = ImageDownloaderApp()
+        win.show()
+        QApplication.processEvents()
+
+        # ---- a) 入口与页面切换 ----
+        check(hasattr(win, 'btn_settings'), '侧边栏有「设置」按钮')
+        eq(win.stack.count(), 3, '堆叠页里多了设置页（解析 / 历史 / 设置）')
+        eq(win.stack.currentIndex(), 0, '默认仍停在解析页')
+
+        win.btn_settings.click()                     # 走真实点击
+        QApplication.processEvents()
+        eq(win.stack.currentIndex(), 2, '点「设置」切到设置页')
+        eq(win.btn_settings.isChecked(), True, '设置按钮进入选中态')
+        eq(win.btn_parse.isChecked(), False, '解析按钮退出选中态（同时只能亮一个）')
+
+        # ---- b) 图库保存位置 ----
+        default_root = win._library_root()
+        check(default_root.endswith('ImgSnag'),
+              f'默认图库位置在系统「图片」下的 ImgSnag（{default_root}）')
+        eq(win.library_path_label.text(), default_root,
+           '页面上显示当前图库位置（用户得知道图存哪去了）')
+        eq(win.library_reset_btn.isEnabled(), False,
+           '本来就在默认位置 → 「恢复默认」置灰（点了没反应比置灰更让人困惑）')
+
+        custom = os.path.join(tempfile.mkdtemp(prefix='imgsnag_gal_'), 'my-gallery')
+        settings.set(K_LIBRARY_DIR, custom)
+        settings.sync()
+        win._refresh_settings_page()
+        eq(win._library_root(), custom, '改完设置，图库根目录立刻生效（不用重启）')
+        eq(win.library_path_label.text(), custom, '页面上的路径跟着变')
+        eq(win.library_reset_btn.isEnabled(), True, '自定义过路径 → 「恢复默认」可点')
+
+        win.library_reset_btn.click()                # 走真实点击
+        QApplication.processEvents()
+        eq((settings.get(K_LIBRARY_DIR) or ''), '', '点「恢复默认」把设置清空')
+        eq(win._library_root(), default_root, '根目录跟着回到默认位置')
+        eq(win.library_reset_btn.isEnabled(), False, '复位后又置灰')
+
+        # ---- c) 关闭窗口时：与托盘菜单双向同步 ----
+        eq(win.close_combo.currentData(), 'quit', '下拉框回显当前生效的关闭行为')
+        win.close_combo.setCurrentIndex(win.close_combo.findData('tray'))   # 走真实信号
+        QApplication.processEvents()
+        eq(settings.get(K_CLOSE_ACTION), 'tray', '在设置页改下拉 = 真的写进设置')
+
+        win._set_close_action('quit')                # 反过来：托盘菜单那条路
+        eq(win.close_combo.currentData(), 'quit',
+           '从托盘菜单改关闭行为后，设置页的下拉跟着变（同一个设置两处显示必须一致）')
+
+        # ---- d) 启动后自动检查新版本（从关于对话框搬来） ----
+        settings.set(K_AUTO_CHECK_UPDATE, True)
+        win._refresh_settings_page()
+        eq(win.auto_update_cb.isChecked(), True, '开关回显当前设置')
+        win.auto_update_cb.setChecked(False)         # 走真实信号
+        QApplication.processEvents()
+        eq(settings.get(K_AUTO_CHECK_UPDATE), False, '取消勾选真的写进设置（不是个摆设）')
+        settings.set(K_AUTO_CHECK_UPDATE, True)
+
+        win.close()
+        QApplication.processEvents()
+
+
 def main():
     app = QApplication.instance() or QApplication([])
 
@@ -2333,6 +2411,7 @@ def main():
         ('UI-27', lambda: test_reparse_keeps_download(app)),
         ('UI-28', lambda: test_copy_title(app)),
         ('UI-29', lambda: test_update_wizard(app)),
+        ('UI-30', lambda: test_settings_page(app)),
     ]
 
     only = os.environ.get('IMGSNAG_UI_ONLY', '').strip()

@@ -126,6 +126,29 @@ CASES = [
      '        wizard.exec()',
      '        return',
      '更新向导能打开', TEST_UI, 1, 'UI-22'),
+
+    # ── 设置页（v2.1.0 新增）：这几条错了的表现都是"点了没反应" ──────────
+    # 图库位置是设置页里唯一带真功能的项（此前只能改注册表），所以重点钉它。
+    ('图库位置不读设置（用户改完不生效，等于还是没有入口）', APP,
+     '        configured = (self.settings.get(K_LIBRARY_DIR) or "").strip()\n'
+     '        if configured:\n            return configured',
+     '        configured = ""\n        if configured:\n            return configured',
+     '改完设置，图库根目录立刻生效（不用重启）', TEST_UI, 1, 'UI-30'),
+
+    ('「恢复默认」不清掉自定义的图库路径（按钮点了没反应）', APP,
+     '        self.settings.set(K_LIBRARY_DIR, "")',
+     '        pass',
+     '点「恢复默认」把设置清空', TEST_UI, 1, 'UI-30'),
+
+    ('从托盘菜单改关闭行为后设置页不同步（同一个设置两处显示打架）', APP,
+     '        combo = getattr(self, "close_combo", None)',
+     '        combo = None',
+     '从托盘菜单改关闭行为后，设置页的下拉跟着变', TEST_UI, 1, 'UI-30'),
+
+    ('设置页不刷新（显示的路径与开关全是进页面那一刻的旧值）', APP,
+     '        self.library_path_label.setText(self._library_root())',
+     '        pass',
+     '页面上显示当前图库位置', TEST_UI, 1, 'UI-30'),
 ]
 
 

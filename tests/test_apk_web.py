@@ -1308,6 +1308,10 @@ def test_page_contract():
     check('src="http' not in page, '没有外链脚本/图片')
     check('href="http' not in page, '没有外链样式')
     check('<script src' not in page, '脚本内联（单文件）')
+    # 页面里的对外跳转一律走 Java 桥 `openExternal`：`<a href>` 在 WebView 壳里
+    # 点了哪也去不了（设置页加"源码地址"时踩到的，反向验证里也钉了一条）。
+    check("openExternal('https://github.com/virmuran/ImgSnag')" in page,
+          '设置页的源码链接走 Java 的桥 openExternal')
     # 带引号一起比对：接口名是"整个字符串"才算数。
     # 只查 `'/img/' in page` 是假断言 —— 改成 `'/imgx/'` 照样命中（子串），
     # 这种"看起来在验证、其实没验证"的检查是反向验证抓出来的。

@@ -210,6 +210,12 @@ CASES = [
      'if (window.imgsnag && window.imgsnag.open){ window.imgsnag.open(url); return true; }',
      'if (false){ return true; }',
      '[9] 去下载走 Java 的桥', TEST_WEB),
+    # 设置页的「源码与反馈」同理 —— 第一版这里写的是 <a href="https://…">，
+    # 在 WebView 壳里点了哪也去不了，必须挂 onclick 走同一个 openExternal。
+    ('设置页的源码链接不走桥（在壳里点外链哪也去不了）', WEBUI,
+     "openExternal('https://github.com/virmuran/ImgSnag')",
+     "window.open('https://github.com/virmuran/ImgSnag')",
+     '[9] 设置页的源码链接走 Java 的桥 openExternal', TEST_WEB),
     # 这条是桌面版真踩过的坑：签名与注入契约不一致，而测试全用假 fetch，
     # 真联网那条路从没被走到 —— 用户一点就报"多传了一个参数"。
     ('更新检测的取数函数少一个参数（真联网才发现）', WEB_PY,

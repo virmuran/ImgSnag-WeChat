@@ -254,6 +254,17 @@ def main():
             "  }},150);});")
         ok &= shot(chrome, base + '/', '04_下载历史.png')
 
+        # ⑤ 设置页：版本更新 / 关于（v2.1.0 从首页搬过来）。
+        #    静态页不用等数据，setView 一调就能拍 —— 但仍要走轮询等 `setView`
+        #    定义好（注入的监听器可能跑在页面脚本前面）。
+        inject(
+            "window.addEventListener('load',function(){"
+            "var t=setInterval(function(){"
+            "  if(typeof setView==='function'){"
+            "    clearInterval(t);setView('settings');"
+            "  }},150);});")
+        ok &= shot(chrome, base + '/', '05_设置页.png')
+
         print()
         # 证据：浏览器侧到底有没有向服务端要过图。
         # 缩略图全是"没下下来"占位时，先看这里 —— 一条都没有说明请求压根没发出
@@ -264,7 +275,7 @@ def main():
             print('   ', u)
 
         if ok:
-            print(f'✅ 四张图都在：{os.path.relpath(OUT, ROOT)}/')
+            print(f'✅ 五张图都在：{os.path.relpath(OUT, ROOT)}/')
         else:
             print('⚠ 有图没拍成，看上面的报错。')
         return 0 if ok else 1

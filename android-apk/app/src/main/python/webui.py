@@ -15,6 +15,10 @@ Chaquopy 把 Python 源码打进 APK 后，"源码同目录的文件运行时还
   · 大图左右滑动 = 翻上/下一张（放大状态下改成平移，不翻页）
   · 底部常驻条 = 全选 / 已选张数 / 保存
   · 分享进来会**自动解析**，抓完停在结果页让你确认再入库（不直接写相册）
+  · 顶栏右侧两个入口（历史 / 设置）**只在首页出现**，进任意一页后都让位给
+    「返回」—— 手机顶栏就这么宽，多挂一个按钮标题就没了。
+  · 首页只留「保存原图」「自动跳过小图」这两个每次抓图前都可能要动的开关；
+    设一次就不动的（版本更新、关于）全收进**设置页**。
 
 ────────────────────────────────────────────────────────────────────────
 返回键：页面自己数楼层，报给 Java
@@ -260,6 +264,7 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
   <button class="tb" id="back" hidden>返回</button>
   <h1 id="topTitle">ImgSnag</h1>
   <button class="tb" id="goHistory" title="下载历史">历史</button>
+  <button class="tb" id="goSettings" title="设置与关于">设置</button>
 </header>
 
 <main>
@@ -299,7 +304,12 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
       </div>
     </div>
 
-    <div class="card mt">
+  </section>
+
+  <!-- 设置：版本更新 / 关于。放"设一次就不动"的东西 ——
+       首页只留「保存原图」「自动跳过小图」两个每次抓图前都可能要动的开关。 -->
+  <section id="view-settings" hidden>
+    <div class="card">
       <div class="setrow">
         <label>
           <span class="sett" id="updTitle">版本更新</span>
@@ -309,6 +319,28 @@ pre{font-size:11.5px; line-height:1.5; color:var(--sub); white-space:pre-wrap;
           <span class="link" id="updWeb" hidden>去网页下载</span>
         </label>
         <button class="btn" id="updBtn">检查</button>
+      </div>
+    </div>
+
+    <div class="card mt">
+      <div class="setrow">
+        <label>
+          <span class="sett">关于 ImgSnag</span>
+          <span class="setd">一键提取文章正文图片，批量下载原图</span>
+        </label>
+      </div>
+      <div class="setrow">
+        <label>
+          <span class="sett">开源许可</span>
+          <span class="setd">MIT 许可证，可自由使用、修改与分发</span>
+        </label>
+      </div>
+      <div class="setrow">
+        <label>
+          <span class="sett">源码与反馈</span>
+          <span class="setd">github.com/virmuran/ImgSnag</span>
+        </label>
+        <button class="btn" id="srcBtn">打开</button>
       </div>
     </div>
 
@@ -418,14 +450,19 @@ function toast(msg){
    系统返回手势能不能用，全看这里有没有老老实实 push。 */
 function paintView(v){
   view = v;
-  $('#view-home').hidden = v !== 'home';
+  var home = (v === 'home');
+  $('#view-home').hidden = !home;
   $('#view-result').hidden = v !== 'result';
   $('#view-history').hidden = v !== 'history';
-  $('#back').hidden = v === 'home';
-  $('#goHistory').hidden = v !== 'home';
+  $('#view-settings').hidden = v !== 'settings';
+  $('#back').hidden = home;
+  // 「历史」「设置」只在首页顶栏露出来 —— 进了任意一页都换成「返回」
+  $('#goHistory').hidden = !home;
+  $('#goSettings').hidden = !home;
   $('#bar').hidden = v !== 'result';
   $('#topTitle').textContent = v === 'history' ? '下载历史'
-    : (v === 'result' ? (st.title || '抓取结果') : 'ImgSnag');
+    : (v === 'settings' ? '设置'
+    : (v === 'result' ? (st.title || '抓取结果') : 'ImgSnag'));
 }
 function setView(v, opts){
   if (!(opts && opts.fromPop) && v !== view){
@@ -452,6 +489,14 @@ reportDepth();
 
 $('#back').onclick = function(){ history.back(); };
 $('#goHistory').onclick = function(){ setView('history'); loadHistory(); };
+/* 设置是静态页，进去不用拉数据 —— 但**必须走 setView**（只有它 push 那一层），
+   否则从设置页侧滑返回会直接退回桌面。 */
+$('#goSettings').onclick = function(){ setView('settings'); };
+/* 源码地址必须走 Java 的桥 —— 页面里直接写 <a href> 的话，在壳里点外链哪也去不了
+   （同理，页面不许出现外链资源：无外链 CSS/JS/图片，弱网下才不会白屏）。 */
+$('#srcBtn').onclick = function(){
+  if (!openExternal('https://github.com/virmuran/ImgSnag')) toast('这个要在 App 里用');
+};
 
 /* ── 首页 ── */
 function startParse(text, html){
