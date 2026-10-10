@@ -3,6 +3,14 @@
 > 最新版本段与 GitHub Release 正文内容完全一致 —— 写一次、两处直接粘贴。
 > 格式规范见 [`RELEASE_NOTES_TEMPLATE.md`](RELEASE_NOTES_TEMPLATE.md)；发版前跑 `python tools/check_release_notes.py` 校验一致性。
 
+### v2.2.0 (2026-10-10)
+
+新增第三个站点 cosz.com（C站），文章页正文图可直接抓取。
+
+**新增**
+- 支持 cosz.com：文章页正文图按原图地址抓取
+- cosz.com 的作者名取不到，来源提示按站点名显示
+
 ### v2.1.0 (2026-10-10)
 
 桌面端与安卓端都新增「设置」页，图库保存位置可在界面里更改，零散的设置也集中到了一处。

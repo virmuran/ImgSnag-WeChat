@@ -13,7 +13,7 @@
     <img alt="deps" src="https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-requests%20%2B%20PySide6--Essentials-blue">
 </div>
 <div>
-    <img alt="version" src="https://img.shields.io/badge/version-2.1.0-green">
+    <img alt="version" src="https://img.shields.io/badge/version-2.2.0-green">
     <img alt="stars" src="https://img.shields.io/github/stars/virmuran/ImgSnag?style=social">
 </div>
 <br>
@@ -32,6 +32,7 @@
 |---|---|---|
 | **微信公众号** | 文章正文图、无水印原图档 | 结构多年稳定，静态 HTML，正文图本身不带水印 |
 | **cosmeitu.com** | 作品页全部正文图、去压缩参数取原图 | 页面自带图片编号（按编号定序最可靠），图床无防盗链 |
+| **cosz.com** | 作品页正文图 | 正文容器固定，图片全部自托管、无防盗链 |
 
 > **新增站点的成本 = 新增一个文件 + 注册表加一行**：站点逻辑集中在 `web_image_dl/sites/`，
 > 一个站点一个文件；公共链路（界面、命名、图库、下载、历史）与具体站点无关。
@@ -232,7 +233,7 @@ python -m venv .venv
 是。输出顺序按正文顺序（合并 ppi 数组顺序与正文标签出现顺序），因此连续编号即阅读顺序，漫画或长图无需手动重排。
 
 **Q：能下载其他网站的图片吗？**
-只支持已明确适配的站点，目前为**微信公众号**与 **cosmeitu.com**；其他站点的链接会直接提示不支持。理由见 [支持哪些站点](#支持哪些站点)。
+只支持已明确适配的站点，目前为**微信公众号**、**cosmeitu.com** 与 **cosz.com**；其他站点的链接会直接提示不支持。理由见 [支持哪些站点](#支持哪些站点)。
 
 **Q：下载的图有水印吗？**
 微信**正文图**本身不带水印，本项目还会优先取 `picture_page_info_list` 中的无水印原图。若混入带水印的**封面图**，在缩略图上右键「屏蔽此尺寸」即可拦下，下次解析同类尺寸自动过滤。

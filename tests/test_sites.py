@@ -537,7 +537,130 @@ def test_cosmeitu_preview_page():
           'title 与 alt 给出**相反**顺序时以 title 为准（B 的 title 编号才是 1）')
 
 
-# ──────────────────────────────────────────────── 十、版权提示文案
+# ──────────────────────────────────────────────── 十、cosz.com 适配器
+# 一个结构更简单的站点：没有编号、没有档位、没有作者 —— 正好检验
+# 「加站点只需一个文件 + 注册表一行」在"简单站点"上是不是也成立（不用凑接口）。
+COSZ_BODY = """
+<html><head><title>C站 CosZ - 二次元图集分享</title></head><body>
+<div class="img-fliter-wrap">
+  <img src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg"
+       data-src="https://cosz.com/wp-content/uploads/2024/02/cosz.com-002_1_post_pos002.jpg" class="img-fliter"/>
+</div>
+<div class="post-style-3-title"><h1>《C站·第3449期》刹那</h1></div>
+<article class="single-article">
+  <div class="entry-content">
+    <div class="content-excerpt">《C站·第3449期》刹那</div>
+    <p><img decoding="async" src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg" data-src="https://cosz.com/wp-content/uploads/2024/02/cosz.com-001_1_post_pos001.jpg" alt="《C站·第3449期》刹那" class=" lazy"></p>
+    <p><img decoding="async" src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg" data-src="https://cosz.com/wp-content/uploads/2024/02/cosz.com-002_1_post_pos002.jpg" alt="《C站·第3449期》刹那" class=" lazy"></p>
+    <p><img decoding="async" src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg" data-src="https://cosz.com/wp-content/uploads/2024/02/cosz.com-003_1_post_pos003.jpg" alt="《C站·第3449期》刹那" class=" lazy"></p>
+  </div>
+</article>
+<aside>
+  <img class="b2-radius lazy" data-src="https://cosz.com/wp-content/uploads/thumb/2024/02/fill_w100_h62_g0_mark_rel.jpg" alt="相关推荐">
+  <img class="avatar b2-radius lazy" data-src="" alt="" :data-src="userData.avatar" src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg"/>
+  <img data-src="https://cosz.com/wp-content/uploads/2024/02/fill_w120_h120_g0_mark_avatar.png" alt="头像">
+</aside>
+<footer>
+  <img src="https://www.cosz.com/images/link1.png" title="二次元宇宙">
+  <img src="https://www.cosz.com/images/logo01.png" class="alignnone">
+</footer>
+<img data-src="https://cosz.com/wp-content/uploads/2024/02/cosz.com-009_1_post_outside.jpg">
+<img src="http://192.168.1.5:2256/wp-content/uploads/2022/06/v2-internal.jpg">
+</body></html>
+"""
+
+
+def test_cosz_adapter():
+    """cosz.com —— 结构最简单的那个站点：正文容器 + 懒加载 data-src，就这两条。"""
+    from web_image_dl.sites.cosmeitu import cosmeitu
+    from web_image_dl.sites.cosz import cosz
+
+    eq(cosz.name, 'cosz', '站点标识')
+    eq(cosz.display_name, 'cosz.com', '界面名')
+    eq(cosz.fallback_title, 'C站图片', '兜底文件夹名')
+
+    # URL 归属：按主机名精确比对（子串匹配会放行伪装域名，请求就发到别人那去了）
+    check(cosz.matches('https://cosz.com/cosplay/60212.html'), '裸域名命中')
+    check(cosz.matches('https://www.cosz.com/x'), 'www 主机名命中')
+    check(cosz.matches('cosz.com/jk/60361.html'), '没写协议的裸域名也命中')
+    check(not cosz.matches('https://cosz.com.evil.com/x'), '伪装域名被拒')
+    check(not cosz.matches('https://mp.weixin.qq.com/s/x'), '不抢微信的链接')
+    check(not cosz.matches('https://www.cosmeitu.com/22252.html'), '不抢 cosmeitu 的链接')
+
+    urls = cosz.extract(COSZ_BODY)
+    eq(len(urls), 3, '只收正文三张 —— 顶部封面（019 那张）、侧栏缩略图、头像、'
+                     '页脚友链图标、主题占位图、内网残留图全被滤掉')
+    check(urls[0].endswith('pos001.jpg'), f'顺序取正文出现顺序（第 1 张）—— 得到 {urls[0][-16:]}')
+    check(urls[1].endswith('pos002.jpg'), '第 2 张')
+    check(urls[2].endswith('pos003.jpg'), '第 3 张')
+    check(all('themes/b2' not in u for u in urls),
+          '拿到的是 data-src 的真图，不是 src 里那张主题占位图')
+
+    eq(cosz.extract_title(COSZ_BODY), '《C站·第3449期》刹那', '标题取 h1')
+    eq(cosz.extract_title(
+        '<html><head><title>《C站·第1期》某人 &#8211; C站 CosZ</title></head></html>'),
+        '《C站·第1期》某人', 'h1 缺席时退回 <title> 并剪掉站点名尾巴')
+    eq(cosz.extract_title('<html></html>'), '', '都取不到返回空串（由兜底名接管）')
+
+    # 作者：B2 主题的作者区是 Vue 渲染的，静态 HTML 里取不到 ——
+    # 本适配器**不实现** extract_author，如实返回空串，界面退化成「来源：cosz.com」。
+    # 编一个名字出来（比如拿标题里的"刹那"）比不显示更糟。
+    eq(cosz.extract_author(COSZ_BODY), '', '取不到署名时返回空串，绝不编造')
+
+    # 没有「原图档位」：_post_<hash> 就是唯一地址，去掉后缀全是 404 ——
+    # 如实给单候选，不假装有（假装有会让 worker 白跑一次失败请求）
+    eq(cosz.candidates(urls[0]), [urls[0]], '单候选，不假装有档位')
+    eq(cosz.candidates(''), [], '空地址没有候选')
+
+    eq(cosz.ext_for('https://cosz.com/wp-content/uploads/2024/02/a.png'), '.png',
+       '扩展名走通用规则')
+    eq(cosz.ext_for('https://cosz.com/wp-content/uploads/2024/02/a.jpg'), '.jpg',
+       '普通 jpg')
+    eq(cosz.download_referer('https://cosz.com/cosplay/60212.html'),
+       'https://cosz.com/cosplay/60212.html',
+       'Referer 沿用页面地址（实测带不带都 200，不覆盖默认行为）')
+
+    check(cosz.sniff(COSZ_BODY) > 0, 'sniff 认得出本站 HTML')
+    eq(cosz.sniff(''), 0, '空 HTML 打 0 分')
+
+    # 三个站点互不串门
+    check(get_adapter('https://cosz.com/cosplay/60212.html') is cosz, 'URL 认出 cosz')
+    check(get_adapter('https://www.cosmeitu.com/22252.html') is cosmeitu, 'URL 仍认出 cosmeitu')
+    check(get_adapter('https://mp.weixin.qq.com/s/x') is weixin, 'URL 仍认出微信')
+    check('cosz.com' in supported_names(), 'supported_names 带上新站点')
+
+
+def test_cosz_container_fallback():
+    """正文容器找不到（改版）时退回整页，靠 URL 特征兜底 —— 且噪音仍被挡住。
+
+    这条盯的是**降级路径**：`entry-content` 万一改名，用户不该看到"一张都没有"，
+    但也不能把侧栏缩略图、头像、页脚图标、内网残留图一起倒出来。
+    """
+    from web_image_dl.sites.cosz import cosz
+
+    html = """
+    <html><body>
+    <img src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg">
+    <img data-src="https://cosz.com/wp-content/uploads/2024/02/body-1.jpg" class=" lazy">
+    <img data-src="https://cosz.com/wp-content/uploads/thumb/2024/02/fill_w100_h62_g0_mark_x.jpg">
+    <img data-src="https://cosz.com/wp-content/uploads/2024/02/fill_w120_h120_g0_mark_avatar.png">
+    <img src="https://www.cosz.com/images/link1.png">
+    <img src="http://192.168.1.5:2256/wp-content/uploads/2022/06/v2-internal.jpg">
+    <img data-src="https://cosz.com/wp-content/uploads/2024/02/body-2.jpg">
+    <img data-src="https://cosz.com/wp-content/uploads/2024/02/body-1.jpg">
+    <img :data-src="item.thumb">
+    <img class="b2-radius lazy" data-src="" alt="" :data-src="userData.avatar"
+         src="https://cosz.com/wp-content/themes/b2/Assets/fontend/images/default-img.jpg"/>
+    </body></html>
+    """
+    urls = cosz.extract(html)
+    eq(urls, ['https://cosz.com/wp-content/uploads/2024/02/body-1.jpg',
+              'https://cosz.com/wp-content/uploads/2024/02/body-2.jpg'],
+       '退回整页后仍只收自有域名的 uploads 图：/thumb/ 与 fill_w 的缩略图、'
+       '页脚图标、内网图、主题占位图、Vue 绑定都不是图；重复地址只留首次')
+
+
+# ──────────────────────────────────────────────── 十一、版权提示文案
 def test_credit_line():
     """版权提示的唯一来源 —— 界面与落盘都从这里取，两处必须一致。"""
     from web_image_dl.sites.base import CREDIT_NOTICE, credit_line
@@ -564,6 +687,8 @@ def main():
     test_worker_runs_through_adapter()
     test_cosmeitu_adapter()
     test_cosmeitu_preview_page()
+    test_cosz_adapter()
+    test_cosz_container_fallback()
     test_credit_line()
     print(f'\n{"=" * 46}')
     print(f'通过 {_passed} 项，失败 {len(_failed)} 项')

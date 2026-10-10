@@ -24,6 +24,7 @@
 from .base import SiteAdapter   # noqa: F401  （对外导出，供新增站点时继承）
 from .weixin import weixin
 from .cosmeitu import cosmeitu
+from .cosz import cosz
 
 #: 注册表。顺序 = 特征打分的平手判定顺序，也是「认不出时退回谁」的依据。
 #:
@@ -33,6 +34,7 @@ from .cosmeitu import cosmeitu
 ADAPTERS = [
     weixin,
     cosmeitu,
+    cosz,
 ]
 
 

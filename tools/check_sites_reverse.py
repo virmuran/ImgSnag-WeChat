@@ -39,6 +39,7 @@ LOG = os.path.join(ROOT, '_rv_sites_log.txt')
 SITES_BASE = 'web_image_dl/sites/base.py'
 WEIXIN = 'web_image_dl/sites/weixin.py'
 COSMEITU = 'web_image_dl/sites/cosmeitu.py'
+COSZ = 'web_image_dl/sites/cosz.py'
 SITES_INIT = 'web_image_dl/sites/__init__.py'
 APP = 'web_image_dl/app.py'
 SYNC = 'android/sync_core.py'
@@ -63,8 +64,8 @@ CASES = [
 
     ('注册表里没有 cosmeitu（新站点等于没接，粘贴链接提示不支持）',
      SITES_INIT,
-     '    cosmeitu,\n]',
-     ']',
+     '    cosmeitu,\n    cosz,\n]',
+     '    cosz,\n]',
      'supported_names 带上新站点', TEST_SITES),
 
     # ── 正文图筛选与定序：错了图集张数与顺序都不对，而用户很难看出为什么 ──────
@@ -239,6 +240,87 @@ CASES = [
      ["CREDIT_FILE = '来源说明.txt'\n"] * 3,
      ["CREDIT_FILE = '来源说明'\n"] * 3,
      '说明文件是 .txt', TEST_ANDROID),
+
+    # ── 第三个站点 cosz.com（2026-10-10）：结构最简单的一个，9 条覆盖它的每条判据 ──
+    # 这一组的共同点：错了的表现都很"安静"—— 多出侧栏缩略图、少几张正文图、
+    # 或者标题里带着站点名，用户未必会为此截图来问。
+    ('cosz 域名改用子串匹配（cosz.com.evil.com 这种伪装域名被放行，请求发到别人那去）',
+     COSZ,
+     '    return _host_of(url) in COSZ_HOSTS',
+     '    return any(h in url for h in COSZ_HOSTS)',
+     '伪装域名被拒', TEST_SITES),
+
+    ('注册表里没有 cosz（新站点等于没接，粘贴链接提示不支持）',
+     SITES_INIT,
+     '    cosz,\n]',
+     ']',
+     'supported_names 带上新站点', TEST_SITES),
+
+    # ⚠ 这条是「正文容器」这个判据的命门。cosz 的正文图与侧栏缩略图**同域名**，
+    #   唯一的可靠分界就是 entry-content 容器；不限制容器的话，顶部封面那张
+    #   会先被收进来（张数从 3 变 4），用户看到一张重复图还不知道哪来的。
+    ('cosz 不再限制正文容器，改成整页撒网（顶部封面 / 页面各处的图都混进来）',
+     COSZ,
+     "    for cls in _CONTENT_CLASSES:\n"
+     "        seg = _slice_div(html, cls)\n"
+     "        if seg:\n"
+     "            return seg\n"
+     "    return html",
+     '    return html',
+     '只收正文三张', TEST_SITES),
+
+    ('cosz 不再优先 data-src（拿到的是 src 里那张主题占位图，一张真图都提不到）',
+     COSZ,
+     '    for pat in (_ATTR_DATA_SRC_RE, _ATTR_SRC_RE):',
+     '    for pat in (_ATTR_SRC_RE,):',
+     '只收正文三张', TEST_SITES),
+
+    ('cosz 不滤 B2 生成的缩略图（侧栏推荐图与头像会被当成正文图收进来）',
+     COSZ,
+     "_THUMB_MARKS = ('/thumb/', 'fill_w')",
+     '_THUMB_MARKS = ()',
+     '退回整页后仍只收自有域名的 uploads 图', TEST_SITES),
+
+    # 降级路径的兜底：容器找不到时靠 URL 特征过滤，这条判据也得是真的
+    ('cosz 不再要求 /wp-content/uploads/ 路径（主题占位图与页脚图标都混进来）',
+     COSZ,
+     "    if '/wp-content/uploads/' not in path:",
+     '    if False:',
+     '退回整页后仍只收自有域名的 uploads 图', TEST_SITES),
+
+    ('cosz 标题不取 h1（退回 <title> 会把页面杂项标题当文件夹名）',
+     COSZ,
+     "    m = re.search(r'<h1[^>]*>(.*?)</h1>', h, re.I | re.S)\n    if m:",
+     "    m = re.search(r'<h1[^>]*>(.*?)</h1>', h, re.I | re.S)\n    if False:",
+     '标题取 h1', TEST_SITES),
+
+    ('cosz 退回 <title> 时不剪站点名尾巴（文件夹名里带上“- C站 CosZ”）',
+     COSZ,
+     "        text = _SITE_SUFFIX_RE.sub('', text).strip()",
+     '        text = text.strip()',
+     'h1 缺席时退回 <title> 并剪掉站点名尾巴', TEST_SITES),
+
+    # 这条钉的是"不编造署名"本身 —— 故意注入一个"看起来挺合理"的取值
+    ('cosz 硬凑一个作者名（界面会显示一个错的出处，比不显示更糟）',
+     COSZ,
+     '    def sniff(self, html: str) -> int:',
+     "    def extract_author(self, html: str) -> str:\n"
+     "        return '刹那'\n\n"
+     '    def sniff(self, html: str) -> int:',
+     '取不到署名时返回空串', TEST_SITES),
+
+    ('cosz 的 sniff 特征词被清空（粘贴本站源码时认不出是哪个站点）',
+     COSZ,
+     "_SNIFF_MARKS = ('cosz.com', 'ecy.cn', 'b2/assets')",
+     '_SNIFF_MARKS = ()',
+     'sniff 认得出本站 HTML', TEST_SITES),
+
+    ('同步清单里漏掉 cosz（新增的站点不会同步到手机两端）',
+     SYNC,
+     "    'sites/cosz.py':    'cosz.com 全部站点知识"
+     "（正文容器 entry-content / 懒加载 data-src / 自托管图）',\n",
+     '',
+     '安卓副本', TEST_ANDROID),
 ]
 
 
